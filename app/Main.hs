@@ -19,10 +19,10 @@ import Text.Parsec
       putState,
       modifyState,
       Parsec,
-      Stream, skipMany1 )
-data InsiType = Str String                  | Num Double | Vec [InsiType] | 
-                Dict [(InsiType, InsiType)] | Idn String | Exp [InsiType] |
-                Clo ([InsiType], [InsiType])
+      Stream, skipMany1, satisfy, choice )
+data InsiType = Str String                   | Num Double | Vec [InsiType] | 
+                Dict [(InsiType, InsiType)]  | Idn String | Exp [InsiType] |
+                Clo ([InsiType], [InsiType]) | Opr String
     deriving (Show, Read, Eq)
 
 ignorable :: Parsec String [(InsiType, InsiType)] [Char]
@@ -31,8 +31,16 @@ ignorable = many1 (oneOf " ,\n")
 accepted :: Parsec String [(InsiType, InsiType)] [Char]
 accepted = many1 (noneOf " ,()[]{}#@")
 
+derefer :: [(InsiType, InsiType)] -> InsiType -> InsiType
+derefer binds (Idn var) = derefer binds val 
+    where Just val = lookup (Idn var) binds
+derefer _ val = val
+
+oper :: Parsec String [(InsiType, InsiType)] InsiType
+oper = Opr <$> (string "+")
+
 iden :: Parsec String [(InsiType, InsiType)] InsiType
-iden = Idn <$> accepted
+iden = getState >>= (\binds -> derefer binds . Idn <$> accepted)
 
 numP :: Parsec String [(InsiType, InsiType)] Double
 numP = try (do
@@ -54,7 +62,7 @@ str :: Parsec String [(InsiType, InsiType)] InsiType
 str = between (char '\"') (char '\"') (Str <$> many (noneOf "\""))
 
 insitux :: Parsec String [(InsiType, InsiType)] InsiType
-insitux = num <|> str <|> iden <|> vec <|> expr <|> dict <|> clo
+insitux = choice [num, str, iden, vec, expr, dict, clo]
 
 vec :: Parsec String [(InsiType, InsiType)] InsiType
 vec = between (char '[') (char ']') (Vec <$> insitux `sepBy` ignorable)
@@ -69,9 +77,8 @@ pair = do
 dict :: Parsec String [(InsiType, InsiType)] InsiType
 dict = between (char '{') (char '}') (Dict <$> pair `sepBy` ignorable)
 
-
 expr :: Parsec String [(InsiType, InsiType)] InsiType
-expr = bind <|> eval
+expr = try eval <|> bind
 
 bind :: Parsec String [(InsiType, InsiType)] InsiType -- will get declarified
 bind = do
@@ -96,15 +103,21 @@ eval = do
     binds <- getState
     return $ apply func binds args
 
+substitute :: [(InsiType, InsiType)] -> [InsiType] -> [InsiType]
+substitute _ [] = []
+substitute argLookUp (e:xps) = derefer argLookUp e : substitute argLookUp xps
+
 apply :: InsiType -> [(InsiType, InsiType)] -> [InsiType] -> InsiType
 apply (Num n) _ [Vec xs] = xs !! floor n
 apply (Num n) _ [Str cs] = Str $ (cs !! floor n) : ""
 apply (Vec xs) _ [thing] = if thing `elem` xs then thing else Str "lol!!!!"
 apply (Dict ds) _ [key] = value
     where Just value = lookup key ds
-apply (Clo (cloArgs, lam)) binds args = 
-apply i binds args = apply func binds args
-    where (Just func) = lookup i binds
+apply (Clo (cloArgs, lam)) binds args = apply func binds subArgs
+    where (func:subArgs) = substitute (zip cloArgs args) lam
+
+apply (Opr "+") _ args = Num . sum $ map fromNum args
+    where fromNum (Num n) = n
 
 getArgs :: [InsiType] -> [InsiType] -> [InsiType] -> ([InsiType], [InsiType])
 getArgs args things [] = (args, things)
