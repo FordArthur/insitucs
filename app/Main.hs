@@ -22,7 +22,7 @@ import Text.Parsec
       Stream, skipMany1, satisfy, choice )
 data InsiType = Str String                   | Num Double | Vec [InsiType] | 
                 Dict [(InsiType, InsiType)]  | Idn String | Exp [InsiType] |
-                Clo ([InsiType], [InsiType]) | Opr String | Bol Bool
+                Clo ([InsiType], [InsiType]) | Bol Bool
     deriving (Show, Read, Eq)
 
 ignorable :: Parsec String [(InsiType, InsiType)] [Char]
@@ -32,7 +32,9 @@ accepted :: Parsec String [(InsiType, InsiType)] [Char]
 accepted = many1 (noneOf " ,()[]{}#@")
 
 derefer :: [(InsiType, InsiType)] -> InsiType -> InsiType
-derefer binds (Idn var) = derefer binds val 
+derefer binds (Idn var)
+    | var `elem` opers = Idn var
+    | otherwise = derefer binds val
     where Just val = lookup (Idn var) binds
 derefer _ val = val
 
@@ -41,11 +43,8 @@ bool = toBool <$> (string "true" <|> string "false")
     where toBool "true"  = Bol True
           toBool "false" = Bol False
 
-oper :: Parsec String [(InsiType, InsiType)] InsiType
-oper = Opr <$> (string "+" <|> string "if")
-
 iden :: Parsec String [(InsiType, InsiType)] InsiType
-iden = getState >>= (\binds -> derefer binds . Idn <$> accepted)
+iden = Idn <$> accepted
 
 numP :: Parsec String [(InsiType, InsiType)] Double
 numP = try (do
@@ -67,7 +66,7 @@ str :: Parsec String [(InsiType, InsiType)] InsiType
 str = between (char '\"') (char '\"') (Str <$> many (noneOf "\""))
 
 insitux :: Parsec String [(InsiType, InsiType)] InsiType
-insitux = choice [num, str, oper, bool, iden, vec, expr, dict, clo]
+insitux = choice [num, str, bool, iden, vec, expr, dict, clo]
 
 vec :: Parsec String [(InsiType, InsiType)] InsiType
 vec = between (char '[') (char ']') (Vec <$> insitux `sepBy` ignorable)
@@ -83,7 +82,8 @@ dict :: Parsec String [(InsiType, InsiType)] InsiType
 dict = between (char '{') (char '}') (Dict <$> pair `sepBy` ignorable)
 
 expr :: Parsec String [(InsiType, InsiType)] InsiType
-expr = eval
+expr = try bind <|> eval -- join parser logic of bind
+-- between ( ) $ "let" >> ... <|> ...
 
 bind :: Parsec String [(InsiType, InsiType)] InsiType -- will get declarified
 bind = do
@@ -102,42 +102,43 @@ eval :: Parsec String [(InsiType, InsiType)] InsiType
 eval = do
     char '('
     skipMany ignorable
-    func <- insitux
-    skipMany ignorable
-    args <- insitux `sepBy` many ignorable
+    exprs <- insitux `sepBy` many ignorable
     char ')'
     binds <- getState
-    return $ apply func binds args
+    return $ apply . map (derefer binds) $ exprs
 
 substitute :: [(InsiType, InsiType)] -> [InsiType] -> [InsiType]
 substitute _ [] = []
 substitute argLookUp (e:xps) = derefer argLookUp e : substitute argLookUp xps
 
-apply :: InsiType -> [(InsiType, InsiType)] -> [InsiType] -> InsiType
-apply (Num n) _ [Vec xs] = xs !! floor n
-apply (Num n) _ [Str cs] = Str $ (cs !! floor n) : ""
-apply (Vec xs) _ [thing] = if thing `elem` xs then thing else Str "lol!!!!"
-apply (Dict ds) _ [key] = value
-    where Just value = lookup key ds
-apply (Clo (cloArgs, lam)) binds args = apply func binds subArgs
-    where (func:subArgs) = substitute (zip cloArgs args) lam
+opers :: [String]
+opers = ["+", "if"]
 
-apply (Opr "+") _ args = Num . sum $ map fromNum args
+apply :: [InsiType] -> InsiType
+apply [Num n, Vec xs] = xs !! floor n
+apply [Num n, Str cs] = Str $ (cs !! floor n) : ""
+apply [Vec xs, thing] = if thing `elem` xs then thing else Str "lol!!!!"
+apply [Dict ds, key] = value
+    where Just value = lookup key ds
+apply (Clo (cloArgs, lam):args) = apply exprs
+    where exprs = substitute (zip cloArgs args) lam
+
+apply (Idn "+":args) = Num . sum $ map fromNum args
     where fromNum (Num n) = n
-apply (Opr "if") _ (Bol p:a:b:_)
+apply (Idn "if":Bol p:a:b:_)
     | p         = a
     | otherwise = b
 
 getArgs :: [InsiType] -> [InsiType] -> [InsiType] -> ([InsiType], [InsiType])
-getArgs args things [] = (args, things)
-getArgs args things (Idn ('%':n:_):xs) = getArgs (Idn (n:""):args) things xs
+getArgs args things [] = (reverse args, reverse things)
+getArgs args things (Idn ('%':n:_):xs) = getArgs (Idn (n:""):args) (Idn (n:""):things) xs
 getArgs args things (x:xs) = getArgs args (x:things) xs
 
-clo :: Parsec String [(InsiType, InsiType)] InsiType -- Makes it :)))
+clo :: Parsec String [(InsiType, InsiType)] InsiType
 clo = between (string "#(") (char ')') (Clo . getArgs [] [] <$> (insitux `sepBy` ignorable))
 
 main :: IO ()
 main = do
     ixFile <- getLine
     file <- readFile ixFile
-    print (runParser insitux [] ixFile file)
+    print $ runParser (insitux `sepBy` ignorable) [] ixFile file
