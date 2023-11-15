@@ -22,7 +22,7 @@ import Text.Parsec
       Stream, skipMany1, satisfy, choice )
 data InsiType = Str String                   | Num Double | Vec [InsiType] | 
                 Dict [(InsiType, InsiType)]  | Idn String | Exp [InsiType] |
-                Clo ([InsiType], [InsiType]) | Opr String
+                Clo ([InsiType], [InsiType]) | Opr String | Bol Bool
     deriving (Show, Read, Eq)
 
 ignorable :: Parsec String [(InsiType, InsiType)] [Char]
@@ -36,8 +36,13 @@ derefer binds (Idn var) = derefer binds val
     where Just val = lookup (Idn var) binds
 derefer _ val = val
 
+bool :: Parsec String [(InsiType, InsiType)] InsiType
+bool = toBool <$> (string "true" <|> string "false")
+    where toBool "true"  = Bol True
+          toBool "false" = Bol False
+
 oper :: Parsec String [(InsiType, InsiType)] InsiType
-oper = Opr <$> (string "+")
+oper = Opr <$> (string "+" <|> string "if")
 
 iden :: Parsec String [(InsiType, InsiType)] InsiType
 iden = getState >>= (\binds -> derefer binds . Idn <$> accepted)
@@ -62,7 +67,7 @@ str :: Parsec String [(InsiType, InsiType)] InsiType
 str = between (char '\"') (char '\"') (Str <$> many (noneOf "\""))
 
 insitux :: Parsec String [(InsiType, InsiType)] InsiType
-insitux = choice [num, str, iden, vec, expr, dict, clo]
+insitux = choice [num, str, oper, bool, iden, vec, expr, dict, clo]
 
 vec :: Parsec String [(InsiType, InsiType)] InsiType
 vec = between (char '[') (char ']') (Vec <$> insitux `sepBy` ignorable)
@@ -78,7 +83,7 @@ dict :: Parsec String [(InsiType, InsiType)] InsiType
 dict = between (char '{') (char '}') (Dict <$> pair `sepBy` ignorable)
 
 expr :: Parsec String [(InsiType, InsiType)] InsiType
-expr = try eval <|> bind
+expr = eval
 
 bind :: Parsec String [(InsiType, InsiType)] InsiType -- will get declarified
 bind = do
@@ -98,6 +103,7 @@ eval = do
     char '('
     skipMany ignorable
     func <- insitux
+    skipMany ignorable
     args <- insitux `sepBy` many ignorable
     char ')'
     binds <- getState
@@ -118,6 +124,9 @@ apply (Clo (cloArgs, lam)) binds args = apply func binds subArgs
 
 apply (Opr "+") _ args = Num . sum $ map fromNum args
     where fromNum (Num n) = n
+apply (Opr "if") _ (Bol p:a:b:_)
+    | p         = a
+    | otherwise = b
 
 getArgs :: [InsiType] -> [InsiType] -> [InsiType] -> ([InsiType], [InsiType])
 getArgs args things [] = (args, things)
