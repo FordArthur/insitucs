@@ -22,8 +22,11 @@ import Text.Parsec
       Stream, skipMany1, satisfy, choice )
 data InsiType = Str String                   | Num Double | Vec [InsiType] | 
                 Dict [(InsiType, InsiType)]  | Idn String | Exp [InsiType] |
-                Clo ([InsiType], [InsiType]) | Bol Bool
+                Clo ([InsiType], [InsiType]) | Bol Bool   | Null
     deriving (Show, Read, Eq)
+
+toValueOrNull (Just x) = x
+toValueOrNull Nothing = Null
 
 ignorable :: Parsec String [(InsiType, InsiType)] [Char]
 ignorable = many1 (oneOf " ,\n")
@@ -57,9 +60,7 @@ numP = try (do
   <|> (string "PI" >> return pi)
 
 num :: Parsec String [(InsiType, InsiType)] InsiType
-num = (numP >>= toNum) <|> do 
-    char '-'
-    numP >>= toNum . negate
+num = (numP >>= toNum) <|> (char '-' >> numP >>= toNum . negate)
     where toNum i = return $ Num i
 
 str :: Parsec String [(InsiType, InsiType)] InsiType
@@ -82,28 +83,39 @@ dict :: Parsec String [(InsiType, InsiType)] InsiType
 dict = between (char '{') (char '}') (Dict <$> pair `sepBy` ignorable)
 
 expr :: Parsec String [(InsiType, InsiType)] InsiType
-expr = try bind <|> eval -- join parser logic of bind
--- between ( ) $ "let" >> ... <|> ...
+expr = between (char '(' >> skipMany ignorable) (skipMany ignorable >> char ')') $ try bind <|> eval 
 
 bind :: Parsec String [(InsiType, InsiType)] InsiType -- will get declarified
 bind = do
-    char '('
-    skipMany ignorable
     string "let"
     skipMany ignorable
-    name <- iden
-    skipMany ignorable
-    val <- insitux
-    char ')'
-    modifyState $ (:) (name, val)
-    return val
+    binds <- concat <$> bindings `sepBy` ignorable
+    modifyState $ (++) binds
+    let (_, value) = last binds
+        in return value
+
+bindings :: Parsec String [(InsiType, InsiType)] [(InsiType, InsiType)]
+bindings = do
+        name <- iden
+        skipMany ignorable
+        binding <- insitux
+        return [(name, binding)]
+    <|> do
+        pvName <- vec
+        skipMany ignorable
+        pvBinding <- vec <|> str
+        return $ together pvName pvBinding
+    <|> do
+        Dict pdName <- dict
+        skipMany ignorable
+        Dict pdBinding <- dict
+        return $ map (\(k, v) -> (v, toValueOrNull $ lookup k pdBinding)) pdName
+            where together (Vec n) (Vec b) = zip n b
+                  together (Vec n) (Str b) = zipWith (\n' b' -> (n', Str $ b' : "")) n b
 
 eval :: Parsec String [(InsiType, InsiType)] InsiType
 eval = do
-    char '('
-    skipMany ignorable
     exprs <- insitux `sepBy` many ignorable
-    char ')'
     binds <- getState
     return $ apply . map (derefer binds) $ exprs
 
@@ -116,10 +128,10 @@ opers = ["+", "if"]
 
 apply :: [InsiType] -> InsiType
 apply [Num n, Vec xs] = xs !! floor n
-apply [Num n, Str cs] = Str $ (cs !! floor n) : ""
-apply [Vec xs, thing] = if thing `elem` xs then thing else Str "lol!!!!"
+apply [Num n, Str cs] = Str $ cs !! floor n : ""
+apply [Vec xs, thing] = if thing `elem` xs then thing else Null
 apply [Dict ds, key] = value
-    where Just value = lookup key ds
+    where value = toValueOrNull $ lookup key ds
 apply (Clo (cloArgs, lam):args) = apply exprs
     where exprs = substitute (zip cloArgs args) lam
 
@@ -137,8 +149,16 @@ getArgs args things (x:xs) = getArgs args (x:things) xs
 clo :: Parsec String [(InsiType, InsiType)] InsiType
 clo = between (string "#(") (char ')') (Clo . getArgs [] [] <$> (insitux `sepBy` ignorable))
 
+-- testing function
+withState :: Parsec s u a -> Parsec s u (a, u)
+withState p = do
+    a <- p
+    s <- getState
+    return (a, s)
+
+-- "repl" mode
 main :: IO ()
 main = do
-    ixFile <- getLine
-    file <- readFile ixFile
-    print $ runParser (insitux `sepBy` ignorable) [] ixFile file
+    i <- getLine
+    print $ runParser (withState $ many insitux `sepBy` ignorable) [] "" i
+    main
