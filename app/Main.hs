@@ -73,7 +73,7 @@ derefer binds (Idn var)
                       | otherwise   = lookUpOneOf xs ds
 derefer binds (Vec v) = Vec . substitute binds $ v
 derefer binds (Exp e) = evalState (apply $ Exp e) binds
-derefer binds (Clo t (args, lams)) = curry (Clo t) args . substitute binds $ lams
+derefer binds (Clo t f) = Clo t f
 derefer _ val = val
 
 substitute :: [(InsiType, InsiType)] -> [InsiType] -> [InsiType]
@@ -125,7 +125,7 @@ dict :: Parsec String () InsiType
 dict = between (char '{') (char '}') (Dict <$> pair `sepBy` ignorable)
 
 expr :: Parsec String () InsiType
-expr = between (char '(' >> skipMany ignorable) (skipMany ignorable >> char ')') $ try bind <|> eval 
+expr = between (char '(' >> skipMany ignorable) (skipMany ignorable >> char ')') $ bind <|> func <|> eval 
 
 bind :: Parsec String () InsiType -- will get declarified
 bind = do
@@ -133,6 +133,14 @@ bind = do
     skipMany ignorable
     binds <- concat <$> bindings (isLocal == "let") `sepBy` ignorable
     return $ Binds binds
+
+func :: Parsec String () InsiType
+func = do
+    string "function"
+    name <- between ignorable ignorable iden
+    vars <- iden `sepBy` ignorable
+    funcs <- insitux `sepBy` ignorable
+    return $ Binds [(name, Clo "fun" (vars, funcs))]
 
 bindings :: Bool -> Parsec String () [(InsiType, InsiType)]
 bindings local = do
@@ -174,7 +182,7 @@ apply ::  InsiType -> State Defs InsiType
 apply (Binds b) = modify (++ b) >> return a
     where (_, a) = last b
 
-apply (Exp [Num n, Vec xs]) = return $ xs !! floor n
+apply (Exp [Num n, Vec xs]) = return $ xs !! floor n -- this should return a null
 apply (Exp [Num n, Str cs]) = return . Str $ cs !! floor n : ""
 apply (Exp [Num n, i]) = get >>= (\s -> apply . Exp $ [Num n, derefer s i])
 apply (Exp [Vec xs, thing]) = return $ if thing `elem` xs then thing else Null
@@ -226,5 +234,5 @@ main = do
     i <- getLine
     putStrLn $ case parse (insitux `sepBy` ignorable) "" i of
         (Right xs) -> show $ recursiveFeed (\s a -> runState (apply a) s) [] xs
-        (Left e)  -> show e
+        (Left e)  -> show e 
     main
