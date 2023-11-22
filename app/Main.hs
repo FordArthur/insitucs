@@ -1,5 +1,8 @@
 module Main where
 
+import Data.List (isPrefixOf)
+import Control.Monad.State (evalState, execState, runState, State, state, get, put, modify)
+
 import Text.Parsec
     ( char,
       digit,
@@ -21,42 +24,69 @@ import Text.Parsec
       Parsec,
       Stream, skipMany1, satisfy, choice, endBy )
 
-data InsiType = Str String                          | Num Double | Vec [InsiType] | 
-                Dict [(InsiType, InsiType)]         | Idn String | Exp [InsiType] |
-                Clo String ([InsiType], [InsiType]) | Bol Bool   | Null
-                
-    deriving (Show, Read, Eq)
+data InsiType = Str String                          | Num Double  | Vec [InsiType] | 
+                Dict [(InsiType, InsiType)]         | Idn String  | Exp [InsiType] |
+                Clo String ([InsiType], [InsiType]) | Bool Bool   | Null           |
+                Binds [(InsiType, InsiType)]
+    deriving (Read, Eq)
+
+type Defs = [(InsiType, InsiType)]
+
+showSpace :: Show a => a -> [Char]
+showSpace x = ' ' : show x
+
+instance Show  InsiType where 
+    show (Str s) = '\"' : s ++ "\""
+    show (Dict d) = '{' : concatMap (\(k, v) -> ", " ++ show k ++ " " ++ show v) d ++ "}"
+    show (Num n)
+        | n == fromInteger (round n) = show $ round n
+        | otherwise = show n
+    show (Vec v) = '[' : concatMap showSpace v ++ " ]"
+    show (Bool True) = "true"
+    show (Bool False) = "false"
+    show Null = "null"
+    show (Idn i) = i
+    show (Exp e) = '(' : concatMap showSpace e ++ ")"
+    show (Clo "lam" (_, l)) = "#(" ++ concatMap showSpace l ++ ")"
+    show (Clo "part" (_, p)) = "@(" ++ concatMap showSpace p ++ ")"
+    show (Clo "fun" (a, f)) = "(fn " ++ concatMap showSpace a ++ " " ++ concatMap showSpace f ++ ")"
 
 toValueOrNull :: Maybe InsiType -> InsiType
 toValueOrNull (Just x) = x
 toValueOrNull Nothing = Null
 
-ignorable :: Parsec String [(InsiType, InsiType)] [Char]
+ignorable :: Parsec String () [Char]
 ignorable = many1 (oneOf " ,\n")
 
-accepted :: Parsec String [(InsiType, InsiType)] [Char]
+accepted :: Parsec String () [Char]
 accepted = many1 (noneOf " ,()[]{}#@;")
 
 derefer :: [(InsiType, InsiType)] -> InsiType -> InsiType
 derefer binds (Idn var)
     | var `elem` opers = Idn var
     | otherwise = derefer binds val
-    where Just val = lookup (Idn var) binds
+    where Just val = lookUpOneOf [Idn var, Idn $ '\"' : var ++ "\""] binds
+            where lookUpOneOf _ [] = Nothing
+                  lookUpOneOf xs ((k, v):ds)
+                      | k `elem` xs = Just v
+                      | otherwise   = lookUpOneOf xs ds
 derefer binds (Vec v) = Vec . substitute binds $ v
+derefer binds (Exp e) = Exp . substitute binds $ e
+derefer binds (Clo t (args, lams)) = curry (Clo t) args . substitute binds $ lams
 derefer _ val = val
 
 substitute :: [(InsiType, InsiType)] -> [InsiType] -> [InsiType]
 substitute argLookUp = map (derefer argLookUp)
 
-bool :: Parsec String [(InsiType, InsiType)] InsiType
+bool :: Parsec String () InsiType
 bool = toBool <$> (string "true" <|> string "false")
-    where toBool "true"  = Bol True
-          toBool "false" = Bol False
+    where toBool "true"  = Bool True
+          toBool "false" = Bool False
 
-iden :: Parsec String [(InsiType, InsiType)] InsiType
+iden :: Parsec String () InsiType
 iden = Idn <$> accepted
 
-numP :: Parsec String [(InsiType, InsiType)] Double
+numP :: Parsec String () Double
 numP = try (do
   int <- many1 digit
   char '.'
@@ -66,51 +96,49 @@ numP = try (do
   <|> (char 'E' >> return (exp 1))
   <|> (string "PI" >> return pi)
 
-num :: Parsec String [(InsiType, InsiType)] InsiType
+num :: Parsec String () InsiType
 num = (numP >>= toNum) <|> (char '-' >> numP >>= toNum . negate)
     where toNum i = return $ Num i
 
-str :: Parsec String [(InsiType, InsiType)] InsiType
+str :: Parsec String () InsiType
 str = between (char '\"') (char '\"') (Str <$> many (noneOf "\""))
 
 trying :: [Parsec s u a] -> Parsec s u a
 trying [p] = p
 trying (p:ps) = try p <|> trying ps
 
-insitux :: Parsec String [(InsiType, InsiType)] InsiType
+insitux :: Parsec String () InsiType
 insitux = trying [clo, num, str, bool, iden, vec, expr, dict]
 
-vec :: Parsec String [(InsiType, InsiType)] InsiType
+vec :: Parsec String () InsiType
 vec = between (char '[') (char ']') (Vec <$> insitux `sepBy` ignorable)
 
-pair :: Parsec String [(InsiType, InsiType)] (InsiType, InsiType)
+pair :: Parsec String () (InsiType, InsiType)
 pair = do
     key <- insitux
     skipMany (oneOf " ,")
     value <- insitux
     return (key, value)
 
-dict :: Parsec String [(InsiType, InsiType)] InsiType
+dict :: Parsec String () InsiType
 dict = between (char '{') (char '}') (Dict <$> pair `sepBy` ignorable)
 
-expr :: Parsec String [(InsiType, InsiType)] InsiType
+expr :: Parsec String () InsiType
 expr = between (char '(' >> skipMany ignorable) (skipMany ignorable >> char ')') $ try bind <|> eval 
 
-bind :: Parsec String [(InsiType, InsiType)] InsiType -- will get declarified
+bind :: Parsec String () InsiType -- will get declarified
 bind = do
-    string "let"
+    isLocal <- string "let" <|> string "var"
     skipMany ignorable
-    binds <- concat <$> bindings `sepBy` ignorable
-    modifyState $ (++) binds
-    let (_, value) = last binds
-        in return value
+    binds <- concat <$> bindings (isLocal == "let") `sepBy` ignorable
+    return $ Binds binds
 
-bindings :: Parsec String [(InsiType, InsiType)] [(InsiType, InsiType)]
-bindings = do
+bindings :: Bool -> Parsec String () [(InsiType, InsiType)]
+bindings local = do
         name <- iden
         skipMany ignorable
         binding <- insitux
-        return [(name, binding)]
+        return [(scopeIf local name, binding)]
     <|> do
         pvName <- vec
         skipMany ignorable
@@ -121,10 +149,12 @@ bindings = do
         skipMany ignorable
         Dict pdBinding <- dict
         return $ map (\(k, v) -> (v, toValueOrNull $ lookup k pdBinding)) pdName
-            where together (Vec n) (Vec b) = zip n b
-                  together (Vec n) (Str b) = zipWith (\n' b' -> (n', Str $ b' : "")) n b
-
-eval :: Parsec String [(InsiType, InsiType)] InsiType
+            where together (Vec n) (Vec b) = zipWith (\n' b' -> (scopeIf local n', b')) n b
+                  together (Vec n) (Str b) = zipWith (\n' b' -> (scopeIf local n', Str $ b' : "")) n b
+                  scopeIf True (Idn name) = Idn $ '\"' : name ++ "\""
+                  scopeIf _    name = name 
+                  
+eval :: Parsec String () InsiType
 eval = do
     exprs <- insitux `sepBy` many ignorable
     binds <- getState
@@ -133,38 +163,49 @@ eval = do
 opers :: [String]
 opers = ["+", "if"]
 
-apply ::  [(InsiType, InsiType)] -> InsiType -> InsiType
+(>>>==) :: Defs -> [InsiType] -> State Defs InsiType
+s' >>>== [f] = state $ \s -> runState (apply f) (s ++ s')
+s >>>== (f:fs) = (s' ++ s) >>>== fs
+     where s' = execState (apply f) s
+
+apply ::  InsiType -> State Defs InsiType
+
+apply (Binds b) = modify (++ b) >> return a
+    where (_, a) = last b
+
 -- derefer all of this
-apply _ (Exp [Num n, Vec xs]) = xs !! floor n
-apply _ (Exp [Num n, Str cs]) = Str $ cs !! floor n : ""
-apply _ (Exp [Vec xs, thing]) = if thing `elem` xs then thing else Null
+apply (Exp [Num n, Vec xs]) = return $ xs !! floor n
+apply (Exp [Num n, Str cs]) = return . Str $ cs !! floor n : ""
+apply (Exp [Num n, i]) = get >>= (\s -> apply . Exp $ [Num n, derefer s i])
+apply (Exp [Vec xs, thing]) = return $ if thing `elem` xs then thing else Null
 --
-apply _ (Exp [Dict ds, key]) = value
+apply (Exp [Dict ds, key]) = return value
     where value = toValueOrNull $ lookup key ds
-apply s (Exp (Clo "lam" (cloArgs, lam):args)) = apply s $ Exp exprs
-    where exprs = substitute (zip cloArgs args ++ s) lam
-apply s (Exp (Clo "part" (cloArgs, lam):args)) = apply s . Exp $ exprs ++ args
-    where exprs = substitute (zip cloArgs args ++ s) lam
-apply s (Exp (Clo "fun" (cloArgs, func):args)) = apply s . Exp . last $ exprs
-    where exprs = map (substitute (zip cloArgs args ++ s) . getExp) func
-          getExp (Exp e) = e 
-apply s (Exp (Idn "+":args)) = Num . sum $ map (fromNum . derefer s) args
+apply (Exp (Clo "lam" (cloArgs, lam):args)) = get >>= exprs >>= apply
+     where exprs s = return . Exp $ substitute (zip cloArgs args ++ s) lam
+apply (Exp (Clo "part" (cloArgs, lam):args)) = get >>= exprs >>= apply
+    where exprs s = return . Exp $ substitute (zip cloArgs args ++ s) lam
+apply (Exp (Clo "fun" (cloArgs, func):args)) = get >>= exprs
+    where exprs s = (zip cloArgs args ++ s) >>>== func
+          getExp (Exp e) = e
+
+apply (Exp (Idn "+":args)) = get >>= (\s -> return . Num . sum $ map (fromNum . derefer s) args)
     where fromNum (Num n) = n
 -- and this
-apply _ (Exp (Idn "if":Bol p:a:b:_))
-    | p         = a
-    | otherwise = b
+apply (Exp (Idn "if":Bool p:a:b:_))
+    | p         = return a
+    | otherwise = return b
 --
 
-apply s (Exp (Idn i:args)) = apply s . Exp $ derefer s (Idn i) : args
-apply _ val = val
+apply (Exp (Idn i:args)) = get >>= (\s -> apply . Exp $ derefer s (Idn i) : args)
+apply val = return val
 
 getArgs :: [InsiType] -> [InsiType] -> [InsiType] -> ([InsiType], [InsiType])
 getArgs args things [] = (reverse args, reverse things)
 getArgs args things (Idn ('%':n:_):xs) = getArgs (Idn (n:""):args) (Idn (n:""):things) xs
 getArgs args things (x:xs) = getArgs args (x:things) xs
 
-clo :: Parsec String [(InsiType, InsiType)] InsiType
+clo :: Parsec String () InsiType
 clo = between (string "#(" >> skipMany ignorable) (skipMany ignorable >> char ')') (Clo "lam" . getArgs [] [] <$> (insitux `sepBy` ignorable))
     <|> between (string "@(" >> skipMany ignorable) (skipMany ignorable >> char ')') (Clo "part" . getArgs [] [] <$> (insitux `sepBy` ignorable))
     <|> do
@@ -175,18 +216,16 @@ clo = between (string "#(" >> skipMany ignorable) (skipMany ignorable >> char ')
         char ')'
         return $ Clo "fun" (cloArgs, funcs)
 
--- testing function
-withState :: Parsec s u a -> Parsec s u (a, u)
-withState p = do
-    a <- p
-    s <- getState
-    return (a, s)
+recursiveFeed :: (Defs -> InsiType -> (InsiType, Defs)) -> Defs -> [InsiType] -> [(InsiType, Defs)]
+recursiveFeed f s [x] = [f s x]
+recursiveFeed f s (x:xs) = (a', s') : recursiveFeed f (s ++ s') xs
+    where (a', s') = f s x
 
 -- "repl" mode
 main :: IO ()
 main = do
     i <- getLine
-    putStrLn $ case runParser (withState insitux `sepBy` ignorable) [] "" i of
-        (Right x) -> show $ map (\(a, s) -> apply s a) x
+    putStrLn $ case parse (insitux `sepBy` ignorable) "" i of
+        (Right xs) -> show $ recursiveFeed (\s a -> runState (apply a) s) [] xs
         (Left e)  -> show e
     main
