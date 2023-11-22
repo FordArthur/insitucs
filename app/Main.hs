@@ -46,10 +46,11 @@ instance Show  InsiType where
     show (Bool False) = "false"
     show Null = "null"
     show (Idn i) = i
-    show (Exp e) = '(' : concatMap showSpace e ++ ")"
-    show (Clo "lam" (_, l)) = "#(" ++ concatMap showSpace l ++ ")"
-    show (Clo "part" (_, p)) = "@(" ++ concatMap showSpace p ++ ")"
-    show (Clo "fun" (a, f)) = "(fn " ++ concatMap showSpace a ++ " " ++ concatMap showSpace f ++ ")"
+    show (Exp (e:es)) = '(' : show e ++ concatMap showSpace es ++ ")"
+    show (Binds bs) = let (_, v) = last bs in show v
+    show (Clo "lam" (_, l:ls)) = "#(" ++ show l ++ concatMap showSpace ls ++ ")"
+    show (Clo "part" (_, p:ps)) = "@(" ++ show p ++ concatMap showSpace ps ++ ")"
+    show (Clo "fun" (a:as, fs)) = "(fn " ++ show a ++ concatMap showSpace as ++ concatMap showSpace fs ++ ")"
 
 toValueOrNull :: Maybe InsiType -> InsiType
 toValueOrNull (Just x) = x
@@ -71,7 +72,7 @@ derefer binds (Idn var)
                       | k `elem` xs = Just v
                       | otherwise   = lookUpOneOf xs ds
 derefer binds (Vec v) = Vec . substitute binds $ v
-derefer binds (Exp e) = Exp . substitute binds $ e
+derefer binds (Exp e) = evalState (apply $ Exp e) binds
 derefer binds (Clo t (args, lams)) = curry (Clo t) args . substitute binds $ lams
 derefer _ val = val
 
@@ -173,29 +174,27 @@ apply ::  InsiType -> State Defs InsiType
 apply (Binds b) = modify (++ b) >> return a
     where (_, a) = last b
 
--- derefer all of this
 apply (Exp [Num n, Vec xs]) = return $ xs !! floor n
 apply (Exp [Num n, Str cs]) = return . Str $ cs !! floor n : ""
 apply (Exp [Num n, i]) = get >>= (\s -> apply . Exp $ [Num n, derefer s i])
 apply (Exp [Vec xs, thing]) = return $ if thing `elem` xs then thing else Null
---
+
 apply (Exp [Dict ds, key]) = return value
     where value = toValueOrNull $ lookup key ds
 apply (Exp (Clo "lam" (cloArgs, lam):args)) = get >>= exprs >>= apply
      where exprs s = return . Exp $ substitute (zip cloArgs args ++ s) lam
 apply (Exp (Clo "part" (cloArgs, lam):args)) = get >>= exprs >>= apply
-    where exprs s = return . Exp $ substitute (zip cloArgs args ++ s) lam
+    where exprs s = return . Exp . (++ args) $ substitute (zip cloArgs args ++ s) lam
 apply (Exp (Clo "fun" (cloArgs, func):args)) = get >>= exprs
     where exprs s = (zip cloArgs args ++ s) >>>== func
           getExp (Exp e) = e
 
 apply (Exp (Idn "+":args)) = get >>= (\s -> return . Num . sum $ map (fromNum . derefer s) args)
-    where fromNum (Num n) = n
--- and this
+    where fromNum (Num n) = n -- temporal solution, typechecking will solve this
+
 apply (Exp (Idn "if":Bool p:a:b:_))
-    | p         = return a
-    | otherwise = return b
---
+    | p         = apply a
+    | otherwise = apply b
 
 apply (Exp (Idn i:args)) = get >>= (\s -> apply . Exp $ derefer s (Idn i) : args)
 apply val = return val
@@ -217,7 +216,7 @@ clo = between (string "#(" >> skipMany ignorable) (skipMany ignorable >> char ')
         return $ Clo "fun" (cloArgs, funcs)
 
 recursiveFeed :: (Defs -> InsiType -> (InsiType, Defs)) -> Defs -> [InsiType] -> [(InsiType, Defs)]
-recursiveFeed f s [x] = [f s x]
+recursiveFeed _ _ [] = []
 recursiveFeed f s (x:xs) = (a', s') : recursiveFeed f (s ++ s') xs
     where (a', s') = f s x
 
