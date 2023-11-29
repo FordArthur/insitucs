@@ -1,10 +1,18 @@
 module Types where
 
+type Label = Maybe (Either String (Int, Int))
+
 data InsiType = Str String                          | Num Double  | Vec [InsiType] | 
-                Dict [(InsiType, InsiType)]         | Idn String  | Exp [InsiType] |
-                Clo String ([InsiType], [InsiType]) | Bool Bool   | Null           |
+                Dict [(InsiType, InsiType)]         | Idn Label String  | Exp [InsiType] |
+                Clo String Label ([InsiType], [InsiType]) | Bool Bool   | Null           |
                 Binds [(InsiType, InsiType)]
     deriving (Read, Eq)
+
+labellessClo :: String -> ([InsiType], [InsiType]) -> InsiType
+labellessClo t = Clo t Nothing
+
+labelWith :: InsiType -> Label -> InsiType
+labelWith (Clo t Nothing clo) label = Clo t label clo
 
 type Defs = [(InsiType, InsiType)]
 
@@ -21,12 +29,12 @@ instance Show InsiType where
     show (Bool True) = "true"
     show (Bool False) = "false"
     show Null = "null"
-    show (Idn i) = i
+    show (Idn _ i) = i
     show (Exp (e:es)) = '(' : show e ++ concatMap showSpace es ++ ")"
     show (Binds bs) = let (_, v) = last bs in show v
-    show (Clo "lam" (_, l:ls)) = "#(" ++ show l ++ concatMap showSpace ls ++ ")"
-    show (Clo "part" (_, p:ps)) = "@(" ++ show p ++ concatMap showSpace ps ++ ")"
-    show (Clo "fun" (a:as, fs)) = "(fn " ++ show a ++ concatMap showSpace as ++ concatMap showSpace fs ++ ")"
+    show (Clo "lam" _ (_, l:ls)) = "#(" ++ show l ++ concatMap showSpace ls ++ ")"
+    show (Clo "part" _ (_, p:ps)) = "@(" ++ show p ++ concatMap showSpace ps ++ ")"
+    show (Clo "fun" _ (a:as, fs)) = "(fn " ++ show a ++ concatMap showSpace as ++ concatMap showSpace fs ++ ")"
 
 toValueOrNullT :: (t -> InsiType) -> Maybe t -> InsiType
 toValueOrNullT t (Just x) = t x

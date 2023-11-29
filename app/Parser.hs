@@ -19,11 +19,28 @@ import Text.Parsec
       putState,
       modifyState,
       Parsec,
+      ParseError,
       Stream, skipMany1, satisfy, choice, endBy )
 
 import Types
-    ( InsiType(Exp, Bool, Num, Binds, Clo, Vec, Str, Idn, Dict),
-      toValueOrNullT )
+    ( InsiType(Exp, Bool, Num, Binds, Clo, Vec, Str, Idn, Dict), Label,
+      toValueOrNullT, labellessClo, labelWith)
+
+type Pos = (Maybe String, (Int, Int))
+
+succArgs :: Enum c => (a, (b, c)) -> (a, (b, c))
+succArgs (a, (b, c)) = (a, (b, succ c))
+
+succNest :: Enum b => (a, (b, c)) -> (a, (b, c))
+succNest (a, (b, c)) = (a, (succ b, c))
+
+
+enumSepBy1 :: a -> (a -> b) -> (b -> Parsec s u c) -> Parsec s u sep -> Parsec s u [c]
+enumSepBy1 a succ' p sep = do
+  x <- p'
+  xs <- many (sep >> p')
+  return (x:xs)
+    where p' = p $ succ' a
 
 ignorable :: Parsec String () [Char]
 ignorable = many1 (oneOf " ,\n")
@@ -36,16 +53,16 @@ getArgs args things [] = (reverse args, reverse things)
 getArgs args things (Idn ('%':n:_):xs) = getArgs (Idn (n:""):args) (Idn (n:""):things) xs
 getArgs args things (x:xs) = getArgs args (x:things) xs
 
-clo :: Parsec String () InsiType
-clo = between (string "#(" >> skipMany ignorable) (skipMany ignorable >> char ')') (Clo "lam" . getArgs [] [] <$> (insitux `sepBy` ignorable))
-    <|> between (string "@(" >> skipMany ignorable) (skipMany ignorable >> char ')') (Clo "part" . getArgs [] [] <$> (insitux `sepBy` ignorable))
+clo :: Pos -> Parsec String () InsiType
+clo label = between (string "#(" >> skipMany ignorable) (skipMany ignorable >> char ')') (labellessClo "lam" . getArgs [] [] <$> (insitux label `sepBy` ignorable))
+    <|> between (string "@(" >> skipMany ignorable) (skipMany ignorable >> char ')') (labellessClo "part" . getArgs [] [] <$> (insitux label `sepBy` ignorable))
     <|> do
         string "(fn"
         skipMany ignorable
         cloArgs <- iden `endBy` ignorable
-        funcs <- insitux `sepBy` ignorable
+        funcs <- insitux label `sepBy` ignorable
         char ')'
-        return $ Clo "fun" (cloArgs, funcs)
+        return $ labellessClo "fun" (cloArgs, funcs)
 
 bool :: Parsec String () InsiType
 bool = toBool <$> (string "true" <|> string "false")
@@ -72,69 +89,68 @@ num = (numP >>= toNum) <|> (char '-' >> numP >>= toNum . negate)
 str :: Parsec String () InsiType
 str = between (char '\"') (char '\"') (Str <$> many (noneOf "\""))
 
-trying :: [Parsec s u a] -> Parsec s u a
-trying [p] = p
-trying (p:ps) = try p <|> trying ps
+insitux :: Pos -> Parsec String () InsiType
+insitux p = tryingWith [clo p, num, str, bool, iden, vec p, expr p, dict p]
+    where tryingWith [p] = p
+          tryingWith (p:ps) = try p <|> tryingWith ps
 
-insitux :: Parsec String () InsiType
-insitux = trying [clo, num, str, bool, iden, vec, expr, dict]
+vec :: Pos -> Parsec String () InsiType
+vec p = between (char '[') (char ']') (Vec <$> insitux p `sepBy` ignorable)
 
-vec :: Parsec String () InsiType
-vec = between (char '[') (char ']') (Vec <$> insitux `sepBy` ignorable)
-
-pair :: Parsec String () (InsiType, InsiType)
-pair = do
-    key <- insitux
+pair :: Pos -> Parsec String () (InsiType, InsiType)
+pair p = do
+    key <- insitux p
     skipMany (oneOf " ,")
-    value <- insitux
+    value <- insitux p
     return (key, value)
 
-dict :: Parsec String () InsiType
-dict = between (char '{') (char '}') (Dict <$> pair `sepBy` ignorable)
+dict :: Pos -> Parsec String () InsiType
+dict p = between (char '{') (char '}') (Dict <$> pair p `sepBy` ignorable)
 
-expr :: Parsec String () InsiType
-expr = between (char '(' >> skipMany ignorable) (skipMany ignorable >> char ')') $ bind <|> func <|> eval 
+expr :: Pos -> Parsec String () InsiType
+expr p = between (char '(' >> skipMany ignorable) (skipMany ignorable >> char ')') $ bind p <|> func p <|> eval
 
-bind :: Parsec String () InsiType -- will get declarified
-bind = do
-    isLocal <- string "let" <|> string "var"
-    skipMany ignorable
-    binds <- concat <$> bindings (isLocal == "let") `sepBy` ignorable
-    return $ Binds binds
-
-func :: Parsec String () InsiType
-func = do
+func :: Pos -> Parsec String () InsiType
+func p = do
     string "function"
-    name <- between ignorable ignorable iden
+    Idn name <- between ignorable ignorable iden
     vars <- iden `sepBy` ignorable
-    funcs <- insitux `sepBy` ignorable
-    return $ Binds [(name, Clo "fun" (vars, funcs))]
+    funcs <- insitux p `sepBy` ignorable
+    return $ Binds [(Idn name, Clo "fun" label (vars, funcs))]
+        where label = let (n, _) = p in n >>= Just . Left
 
-bindings :: Bool -> Parsec String () [(InsiType, InsiType)]
-bindings local = do
-        name <- iden
+bind :: Pos -> Parsec String () InsiType
+bind p = do
+    local <- string "let" <|> string "var"
+    skipMany ignorable
+    Binds . concat <$> bindings (localToPos local p) `sepBy` ignorable
+    where localToPos "var" (_, p) = (Nothing, p)
+          localToPos "let"  p    = p
+
+bindings :: Pos -> Parsec String () [(InsiType, InsiType)]
+bindings p = do
+        Idn name <- iden
         skipMany ignorable
-        binding <- insitux
-        return [(scopeIf local name, binding)]
-    <|> do
-        pvName <- vec
+        binding <- insitux $ succArgs p
+        return [(Idn name, binding)]
+    <|> do -- TODO: proof that tag works inside destructuring
+        pvName <- vec $ succNest p
         skipMany ignorable
-        pvBinding <- vec <|> str
+        pvBinding <- vec (succNest p) <|> str
         return $ together pvName pvBinding
     <|> do
-        Dict pdName <- dict
+        Dict pdName <- dict $ succNest p
         skipMany ignorable
-        Dict pdBinding <- dict
+        Dict pdBinding <- dict $ succNest p
         return $ map (\(k, v) -> (v, toValueOrNullT id $ lookup k pdBinding)) pdName
-            where together (Vec n) (Vec b) = zipWith (\n' b' -> (scopeIf local n', b')) n b
-                  together (Vec n) (Str b) = zipWith (\n' b' -> (scopeIf local n', Str $ b' : "")) n b
-                  scopeIf True (Idn name) = Idn $ '\"' : name ++ "\""
-                  scopeIf _    name = name 
-                  
+            where together (Vec n) (Vec b) = zip n b
+                  together (Vec n) (Str b) = zipWith (\n' b' -> (n', Str $ b' : "")) n b
+                    
 eval :: Parsec String () InsiType
 eval = do
-    exprs <- insitux `sepBy` many ignorable
+    exprs <- insitux (Nothing, (0, 0)) `sepBy` many ignorable
     binds <- getState
     return $ Exp exprs
 
-buildAST = parse (insitux `sepBy` ignorable) ""
+buildAST :: String -> Either ParseError [InsiType]
+buildAST = parse (insitux (Nothing, (-1, 0)) `sepBy` ignorable) ""
