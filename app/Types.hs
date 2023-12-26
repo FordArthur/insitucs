@@ -1,6 +1,14 @@
 module Types where
 
-type Label = Maybe (Either String (Int, Int))
+import Control.Arrow
+
+type Label = (Maybe String, Maybe (Int, Int))
+
+succArgs :: Enum c => (a, Maybe (b, c)) -> (a, Maybe (b, c))
+succArgs = second (second succ <$>)
+
+succNest :: Enum b => (a, Maybe (b, c)) -> (a, Maybe (b, c))
+succNest = second (first succ <$>)
 
 data InsiType = Str String                          | Num Double  | Vec [InsiType] | 
                 Dict [(InsiType, InsiType)]         | Idn Label String  | Exp [InsiType] |
@@ -8,15 +16,9 @@ data InsiType = Str String                          | Num Double  | Vec [InsiTyp
                 Binds [(InsiType, InsiType)]
     deriving (Read, Eq)
 
-labellessClo :: String -> ([InsiType], [InsiType]) -> InsiType
-labellessClo t = Clo t Nothing
-
-labelWith :: InsiType -> Label -> InsiType
-labelWith (Clo t Nothing clo) label = Clo t label clo
-
 type Defs = [(InsiType, InsiType)]
 
-showSpace :: Show a => a -> [Char]
+showSpace :: Show a => a -> String
 showSpace x = ' ' : show x
 
 instance Show InsiType where 
@@ -34,7 +36,7 @@ instance Show InsiType where
     show (Binds bs) = let (_, v) = last bs in show v
     show (Clo "lam" _ (_, l:ls)) = "#(" ++ show l ++ concatMap showSpace ls ++ ")"
     show (Clo "part" _ (_, p:ps)) = "@(" ++ show p ++ concatMap showSpace ps ++ ")"
-    show (Clo "fun" _ (a:as, fs)) = "(fn " ++ show a ++ concatMap showSpace as ++ concatMap showSpace fs ++ ")"
+    show (Clo "fun" _ (a:as, fs)) = "(fn" ++ showSpace a ++ concatMap showSpace as ++ concatMap showSpace fs ++ ")"
 
 toValueOrNullT :: (t -> InsiType) -> Maybe t -> InsiType
 toValueOrNullT t (Just x) = t x
