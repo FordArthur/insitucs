@@ -1,40 +1,46 @@
 module Main where
 
+{-# LANGUAGE DeriveDataTypeable #-}
+
 import Data.Char (isDigit)
 import Data.List (isPrefixOf, elemIndex)
-import Control.Monad.State (evalState, execState, runState, State, state, get, modify)
+import Control.Monad.State
 import Parser (buildAST)
-import Types (Label, Defs, InsiType(..), toValueOrNullT)
+import Types (RunError(..), Label, Defs, InsiType(..), toValueOrNullT, opers, typeCheck)
 
-derefer :: Defs -> InsiType -> InsiType
+derefer :: Defs -> InsiType -> Either RunError InsiType
 derefer binds i@(Idn p var)
-    | var `elem` opers = i
-    | otherwise = derefer binds val
-    where Just val = lookif (\(Idn _ var') -> var' == var) binds
-            where lookif _ [] = Nothing
+    | any (\(o, _) -> o == var) opers = Right i
+    | otherwise = val >>= derefer binds
+    where val = lookif (\(Idn _ var') -> var' == var) binds 
+            where lookif _ [] = Left $ OutOfScope i
                   lookif p ((k, v):xs)
-                    | p k = Just v
+                    | p k = Right v
                     | otherwise = lookif p xs
-derefer binds (Vec v) = Vec . substitute binds $ v
-derefer binds (Exp e) = evalState (eval $ Exp e) binds
-derefer binds (Clo t l f) = Clo t l f
-derefer _ val = val
+derefer binds (Vec v) = fmap Vec . substitute binds $ v
+derefer binds e@(Exp _) = evalStateT (eval e) binds
+derefer binds (Clo t l f) = Right $ Clo t l f
+derefer _ val = Right val
 
-substitute :: Defs -> [InsiType] -> [InsiType]
-substitute argLookUp = map (derefer argLookUp)
 
-opers :: [String]
-opers = ["+", "if"]
+substitute :: Defs -> [InsiType] -> Either RunError [InsiType]
+substitute argLookUp = traverse (derefer argLookUp)
 
-recursiveExec :: Defs -> [InsiType] -> Label -> State Defs InsiType
-recursiveExec s [f] l = state (\_ -> cleanScope $ runState (eval f) s)
+recursiveExec :: Defs -> [InsiType] -> Label -> Either RunError InsiType
+recursiveExec s [f] l = evalStateT (eval f) s
     where cleanScope (p, q) = (p, filter (not . retiring l) q)
           retiring l (Idn l' _, _) = l == l'
           retiring _ _             = False
-recursiveExec s (f:fs) l = recursiveExec (s' ++ s) fs l
-    where s' = execState (eval f) s
+recursiveExec s (f:fs) l = s' >>= (\s' -> recursiveExec (s' ++ s) fs l)
+    where s' = execStateT (eval f) s
 
-eval ::  InsiType -> State Defs InsiType
+todoLookup :: String -> [(String, v)] -> v
+todoLookup x xs = 
+    case lookup x xs of
+        Just x' -> x'
+        Nothing -> error $ "IMPLEMENT " ++ x
+
+eval ::  InsiType -> StateT Defs (Either RunError) InsiType
 
 eval (Binds b) = modify (++ b) >> return a
     where (_, a) = last b
@@ -46,38 +52,37 @@ eval (Exp [Num n, Str cs]) = return . toValueOrNullT (Str . (: "")) $ floor n `a
     where at _ [] = Nothing
           at 0 (x:_) =  Just x
           at n (x:xs) = at (n - 1) xs
-eval (Exp [Num n, i]) = get >>= (\s -> eval . Exp $ [Num n, derefer s i])
+eval (Exp [n@(Num _), i]) = get >>= (\s -> either (lift . Left) (\i' -> eval (Exp [n, i'])) (derefer s i))
 eval (Exp [Vec xs, thing]) = return $ if thing `elem` xs then thing else Null
 
 eval (Exp [Dict ds, key]) = return value
     where value = toValueOrNullT id $ lookup key ds
 eval (Exp (Clo "lam" l (cloArgs, lam):args)) = get >>= exprs >>= eval
-     where exprs s = return . Exp $ substitute (zip cloArgs args ++ s) lam
+     where exprs s = lift $ Exp <$> substitute (zip cloArgs args ++ s) lam
 eval (Exp (Clo "part" l (cloArgs, lam):args)) = get >>= exprs >>= eval
-    where exprs s = return . Exp . (++ args) $ substitute (zip cloArgs args ++ s) lam
+    where exprs s = lift $ Exp .  (++ args) <$> substitute (zip cloArgs args ++ s) lam
 eval (Exp (Clo "fun" l (cloArgs, func):args)) = get >>= exprs
-    where exprs s = recursiveExec (zip cloArgs args ++ s) func l
+    where exprs s = lift $ recursiveExec (zip cloArgs args ++ s) func l
 
-eval (Exp (Idn _ "+":args)) = get >>= (\s -> return . Num . sum $ map (fromNum . derefer s) args)
-    where fromNum (Num n) = n -- temporal solution, typechecking will solve this
+eval (Exp (Idn _ "+":args)) = do
+        s <- get
+        args' <- lift $ traverse (derefer s) args
+        lift $ typeCheck (todoLookup "+" opers) args'
+        lift $ Right . Num . sum . map fromNum $ args'
+    where fromNum (Num n) = n
 
 eval (Exp (Idn _ "if":Bool p:a:b:_))
     | p         = eval a
     | otherwise = eval b
 
-eval (Exp (Idn p i:args)) = get >>= (\s -> eval . Exp $ derefer s (Idn p i) : args)
+eval (Exp (i@(Idn _ _):args)) = get >>= (\s -> lift (Exp . (: args) <$> derefer s i) >>= eval)
 eval val = return val
 
-recursiveRun :: (Defs -> InsiType -> (InsiType, Defs)) -> Defs -> [InsiType] -> [(InsiType, Defs)]
-recursiveRun _ _ [] = []
-recursiveRun f s (x:xs) = (a', s') : recursiveRun f (s ++ s') xs
-    where (a', s') = f s x
-
--- "repl" mode dsdssdsds
+-- "repl" modesdsds
 main :: IO ()
 main = do
     i <- getLine
     putStrLn $ case buildAST i of
-        (Right xs) -> show $ recursiveRun (\s a -> runState (eval a) s) [] xs
+        (Right xs) -> show $ recursiveExec [] xs (Nothing, Nothing)
         (Left e)  -> show e 
     main

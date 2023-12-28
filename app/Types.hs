@@ -1,5 +1,9 @@
+{-# LANGUAGE DeriveDataTypeable #-}
+
 module Types where
 
+import Data.List
+import Data.Data
 import Control.Arrow
 
 type Label = (Maybe String, Maybe (Int, Int))
@@ -14,7 +18,7 @@ data InsiType = Str String                          | Num Double  | Vec [InsiTyp
                 Dict [(InsiType, InsiType)]         | Idn Label String  | Exp [InsiType] |
                 Clo String Label ([InsiType], [InsiType]) | Bool Bool   | Null           |
                 Binds [(InsiType, InsiType)]
-    deriving (Read, Eq)
+    deriving (Read, Eq, Data)
 
 type Defs = [(InsiType, InsiType)]
 
@@ -41,3 +45,23 @@ instance Show InsiType where
 toValueOrNullT :: (t -> InsiType) -> Maybe t -> InsiType
 toValueOrNullT t (Just x) = t x
 toValueOrNullT _ Nothing = Null
+
+type IType = String
+type InTypes = [[IType]]
+
+data RunError = TypeError ([IType], IType) | OutOfScope InsiType
+    deriving (Eq, Show)
+
+constrInString :: Data a => a -> String
+constrInString = showConstr . toConstr
+
+anyType :: [String]
+anyType = ["Str", "Dict", "Num", "Vec", "Bool", "Null", "Idn", "Exp", "Clo"]
+
+opers :: [(String, InTypes)]
+opers = [("+", repeat ["Num"]), ("if", [anyType, anyType, anyType])]
+
+typeCheck :: InTypes -> [InsiType] -> Either RunError [InsiType]
+typeCheck checkers checking = case find (\(t, v) -> constrInString v `notElem` t) $ zip checkers checking of
+        Just e  -> Left . TypeError . second show $ e
+        Nothing -> Right checking
