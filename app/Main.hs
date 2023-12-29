@@ -1,12 +1,18 @@
 module Main where
 
-{-# LANGUAGE DeriveDataTypeable #-}
-
 import Data.Char (isDigit)
 import Data.List (isPrefixOf, elemIndex)
 import Control.Monad.State
+    ( (>=>),
+      MonadTrans(lift),
+      MonadState(get),
+      gets,
+      modify,
+      evalStateT,
+      execStateT,
+      StateT )
 import Parser (buildAST)
-import Types (RunError(..), Label, Defs, InsiType(..), toValueOrNullT, opers, typeCheck)
+import Types (RunError(..), Label, Defs, InsiType(..), toValueOrNullT, opers, builtIn, typeCheck, constrInString)
 
 derefer :: Defs -> InsiType -> Either RunError InsiType
 derefer binds i@(Idn p var)
@@ -18,21 +24,30 @@ derefer binds i@(Idn p var)
                     | p k = Right v
                     | otherwise = lookif p xs
 derefer binds (Vec v) = fmap Vec . substitute binds $ v
-derefer binds e@(Exp _) = evalStateT (eval e) binds
+derefer binds (Exp e) = Exp <$> substitute binds e
 derefer binds (Clo t l f) = Right $ Clo t l f
 derefer _ val = Right val
 
+simplify :: InsiType -> StateT Defs (Either RunError) InsiType
+simplify (Exp e) = Exp <$> mapM eval e
+simplify ix      = return ix
+
+run :: InsiType -> StateT Defs (Either RunError) InsiType
+run f = gets (`derefer` f) >>= (lift >=> simplify) >>= (lift . check) >>= eval
+    where check (Exp (h@(Idn _ f'):args')) = Exp . (h :) <$> typeCheck (todoLookup f' opers) args'
+          check (Exp (f':args'))           = Exp . (f':) <$> typeCheck (todoLookup (constrInString f') builtIn) args'
+          check ix                         = Right ix
 
 substitute :: Defs -> [InsiType] -> Either RunError [InsiType]
 substitute argLookUp = traverse (derefer argLookUp)
 
 recursiveExec :: Defs -> [InsiType] -> Label -> Either RunError InsiType
-recursiveExec s [f] l = evalStateT (eval f) s
+recursiveExec s [f] l = evalStateT (run f) s
     where cleanScope (p, q) = (p, filter (not . retiring l) q)
           retiring l (Idn l' _, _) = l == l'
           retiring _ _             = False
 recursiveExec s (f:fs) l = s' >>= (\s' -> recursiveExec (s' ++ s) fs l)
-    where s' = execStateT (eval f) s
+    where s' = execStateT (run f) s
 
 todoLookup :: String -> [(String, v)] -> v
 todoLookup x xs = 
@@ -52,7 +67,6 @@ eval (Exp [Num n, Str cs]) = return . toValueOrNullT (Str . (: "")) $ floor n `a
     where at _ [] = Nothing
           at 0 (x:_) =  Just x
           at n (x:xs) = at (n - 1) xs
-eval (Exp [n@(Num _), i]) = get >>= (\s -> either (lift . Left) (\i' -> eval (Exp [n, i'])) (derefer s i))
 eval (Exp [Vec xs, thing]) = return $ if thing `elem` xs then thing else Null
 
 eval (Exp [Dict ds, key]) = return value
@@ -78,7 +92,7 @@ eval (Exp (Idn _ "if":Bool p:a:b:_))
 eval (Exp (i@(Idn _ _):args)) = get >>= (\s -> lift (Exp . (: args) <$> derefer s i) >>= eval)
 eval val = return val
 
--- "repl" modesdsds
+-- "repl" mode
 main :: IO ()
 main = do
     i <- getLine

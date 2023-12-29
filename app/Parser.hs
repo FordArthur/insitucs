@@ -1,7 +1,7 @@
 module Parser where
 
 import Control.Monad (ap)
-import Control.Arrow 
+import Control.Arrow ( Arrow(second, (***)) ) 
 
 import Text.Parsec
     ( char,

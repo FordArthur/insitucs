@@ -61,6 +61,9 @@ anyType = ["Str", "Dict", "Num", "Vec", "Bool", "Null", "Idn", "Exp", "Clo"]
 opers :: [(String, InTypes)]
 opers = [("+", repeat ["Num"]), ("if", [anyType, anyType, anyType])]
 
+builtIn :: [(String, InTypes)]
+builtIn = [("Num", [["Str", "Vec"]]), ("Vec", [anyType]), ("Dict", [anyType]), ("Bool", [anyType, anyType]), ("Clo", repeat anyType)]
+
 typeCheck :: InTypes -> [InsiType] -> Either RunError [InsiType]
 typeCheck checkers checking = case find (\(t, v) -> constrInString v `notElem` t) $ zip checkers checking of
         Just e  -> Left . TypeError . second show $ e
