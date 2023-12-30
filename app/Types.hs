@@ -2,8 +2,10 @@
 
 module Types where
 
+
 import Data.List
 import Data.Data
+import Data.Functor
 import Control.Arrow
 
 type Label = (Maybe String, Maybe (Int, Int))
@@ -46,10 +48,11 @@ toValueOrNullT :: (t -> InsiType) -> Maybe t -> InsiType
 toValueOrNullT t (Just x) = t x
 toValueOrNullT _ Nothing = Null
 
+type ArityCheck = (Ordering, Int)
 type IType = String
 type InTypes = [[IType]]
 
-data RunError = TypeError ([IType], IType) | OutOfScope InsiType
+data RunError = TypeError ([IType], IType) | OutOfScope InsiType | ArityError ArityCheck Int
     deriving (Eq, Show)
 
 constrInString :: Data a => a -> String
@@ -58,13 +61,21 @@ constrInString = showConstr . toConstr
 anyType :: [String]
 anyType = ["Str", "Dict", "Num", "Vec", "Bool", "Null", "Idn", "Exp", "Clo"]
 
-opers :: [(String, InTypes)]
-opers = [("+", repeat ["Num"]), ("if", [anyType, anyType, anyType])]
+opers :: [(String, (InTypes, ArityCheck))]
+opers = [("+", (repeat ["Num"], (GT, 1))), ("if", ([anyType, anyType, anyType], (EQ, 3)))]
 
-builtIn :: [(String, InTypes)]
-builtIn = [("Num", [["Str", "Vec"]]), ("Vec", [anyType]), ("Dict", [anyType]), ("Bool", [anyType, anyType]), ("Clo", repeat anyType)]
+builtIn :: [(String, (InTypes, ArityCheck))]
+builtIn = [("Num", ([["Str", "Vec"]], (EQ, 1))), ("Vec", ([anyType], (EQ, 1))), ("Dict", ([anyType], (EQ, 1))), ("Bool", ([anyType, anyType], (EQ, 2))), ("Clo", (repeat anyType, (GT, -1)))]
 
-typeCheck :: InTypes -> [InsiType] -> Either RunError [InsiType]
-typeCheck checkers checking = case find (\(t, v) -> constrInString v `notElem` t) $ zip checkers checking of
-        Just e  -> Left . TypeError . second show $ e
-        Nothing -> Right checking
+typeCheck :: InsiType -> (InTypes, ArityCheck) -> [InsiType] -> Either RunError InsiType
+typeCheck f (checkers, arityPredicate) checking = (zipIfPred arityPredicate checkers checking >>= findTypeMismatch) <&> constr . (f:)
+    where findTypeMismatch tvs = 
+            case find (\(t, v) -> constrInString v `notElem` t) tvs of
+                    Just e  -> Left . TypeError . second show $ e
+                    Nothing -> Right checking
+          zipIfPred p@(o, _) as bs
+            | o /= EQ || runArityCheck p bl = Right $ zip as bs
+            | otherwise                     = Left  $ ArityError p bl
+            where bl = length bs
+          runArityCheck (shouldBe, n) n' = shouldBe == n' `compare` n
+          constr = if runArityCheck arityPredicate (length checking) then Exp else if fst arityPredicate /= EQ then (\exp -> Clo "part" (Nothing, Nothing) ([],exp)) else Exp

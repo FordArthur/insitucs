@@ -29,8 +29,8 @@ import Types
     ( InsiType(Exp, Bool, Num, Binds, Clo, Vec, Str, Idn, Dict), Label, Defs, succArgs, succNest,
       toValueOrNullT)
 
-enumSepBy :: a -> (a -> a) -> (a -> Parsec s u b) -> Parsec s u sep -> Parsec s u [b]
-enumSepBy start next p sep = do
+enumEndBy :: a -> (a -> a) -> (a -> Parsec s u b) -> Parsec s u sep -> Parsec s u [b]
+enumEndBy start next p sep = do
   x <- p start
   xs <- many (sep >> p (next start))
   return (x:xs)
@@ -53,7 +53,7 @@ clo (_, p') = between (string "#(" >> skipMany ignorable) (skipMany ignorable >>
         string "(fn"
         skipMany ignorable
         cloArgs <- iden p `endBy` ignorable
-        funcs <- enumSepBy p succArgs insitux ignorable -- or, if no expressions occur, use the last atom in the closure
+        funcs <- enumEndBy p succArgs insitux ignorable -- or, if no expressions occur, use the last atom in the closure
         char ')'
         return $ Clo "fun" p (cloArgs, funcs)
     where p = (Nothing, p')
@@ -90,7 +90,7 @@ insitux p = tryingWith [clo p', num, str, bool, iden p', vec p', dict p', expr p
           p' = succNest p
 
 vec :: Label -> Parsec String () InsiType
-vec p = between (char '[') (char ']') (Vec <$> enumSepBy p (succArgs . succArgs) insitux ignorable)
+vec p = between (char '[') (char ']') (Vec <$> enumEndBy p (succArgs . succArgs) insitux ignorable)
 
 pair :: Label -> Parsec String () (InsiType, InsiType)
 pair p = do
@@ -100,7 +100,7 @@ pair p = do
     return (key, value)
 
 dict :: Label -> Parsec String () InsiType
-dict p = between (char '{') (char '}') (Dict <$> enumSepBy p succArgs pair ignorable)
+dict p = between (char '{') (char '}') (Dict <$> enumEndBy p succArgs pair ignorable)
 
 expr :: Label -> Parsec String () InsiType
 expr p = between (char '(' >> skipMany ignorable) (skipMany ignorable >> char ')') $ bind p <|> func p <|> eval p
@@ -109,15 +109,15 @@ func :: Label -> Parsec String () InsiType
 func p = do
     string "function"
     Idn _ name <- between ignorable ignorable $ iden p
-    vars <- enumSepBy p succArgs iden ignorable
-    funcs <- enumSepBy p succArgs insitux ignorable
+    vars <- iden p `endBy` ignorable
+    funcs <- enumEndBy p succArgs insitux ignorable
     return $ Binds [(Idn p name, Clo "fun" p (vars, funcs))]
 
 bind :: Label -> Parsec String () InsiType
 bind p = do
     local <- string "let" <|> string "var"
     skipMany ignorable
-    Binds . concat <$> enumSepBy p (succArgs . succArgs) (bindings . localToLabel local) ignorable
+    Binds . concat <$> enumEndBy p (succArgs . succArgs) (bindings . localToLabel local) ignorable
     where localToLabel "var" (_, p) = (Nothing, p)
           localToLabel "let"  l     = l
 
