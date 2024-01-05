@@ -2,7 +2,6 @@
 
 module Types where
 
-
 import Data.List
 import Data.Data
 import Data.Functor
@@ -27,6 +26,7 @@ type Defs = [(InsiType, InsiType)]
 showSpace :: Show a => a -> String
 showSpace x = ' ' : show x
 
+
 instance Show InsiType where 
     show (Str s) = '\"' : s ++ "\""
     show (Dict d) = '{' : concatMap (\(k, v) -> ", " ++ show k ++ " " ++ show v) d ++ "}"
@@ -50,7 +50,8 @@ toValueOrNullT _ Nothing = Null
 
 type ArityCheck = (Ordering, Int)
 type IType = String
-type InTypes = [[IType]]
+type InTypes = [([IType], IsLazy)]
+type IsLazy = Bool
 
 data RunError = TypeError ([IType], IType) | OutOfScope InsiType | ArityError ArityCheck Int
     deriving (Eq, Show)
@@ -58,20 +59,23 @@ data RunError = TypeError ([IType], IType) | OutOfScope InsiType | ArityError Ar
 constrInString :: Data a => a -> String
 constrInString = showConstr . toConstr
 
-anyType :: [String]
+anyType :: [IType]
 anyType = ["Str", "Dict", "Num", "Vec", "Bool", "Null", "Idn", "Exp", "Clo"]
 
+anyTypeLazy :: ([IType], IsLazy)
+anyTypeLazy = (anyType,False)
+
 opers :: [(String, (InTypes, ArityCheck))]
-opers = [("+", (repeat ["Num"], (GT, 1))), ("if", ([anyType, anyType, anyType], (EQ, 3)))]
+opers = [("+", (repeat (["Num"], False), (GT, 1))), ("if", ([(anyType, False), (anyType, True), (anyType, True)], (EQ, 2))), ("=", (repeat anyTypeLazy, (GT, 1)))]
 
 builtIn :: [(String, (InTypes, ArityCheck))]
-builtIn = [("Num", ([["Str", "Vec"]], (EQ, 1))), ("Vec", ([anyType], (EQ, 1))), ("Dict", ([anyType], (EQ, 1))), ("Bool", ([anyType, anyType], (EQ, 2))), ("Clo", (repeat anyType, (GT, -1)))]
+builtIn = [("Num", ([(["Str", "Vec"], False)], (EQ, 1))), ("Vec", ([anyTypeLazy], (EQ, 1))), ("Dict", ([anyTypeLazy], (EQ, 1))), ("Bool", ([anyTypeLazy, anyTypeLazy], (EQ, 2))), ("Clo", (repeat anyTypeLazy, (GT, -1))), ("Exp", (repeat anyTypeLazy, (GT, -1)))]
 
 typeCheck :: InsiType -> (InTypes, ArityCheck) -> [InsiType] -> Either RunError InsiType
 typeCheck f (checkers, arityPredicate) checking = (zipIfPred arityPredicate checkers checking >>= findTypeMismatch) <&> constr . (f:)
     where findTypeMismatch tvs = 
-            case find (\(t, v) -> constrInString v `notElem` t) tvs of
-                    Just e  -> Left . TypeError . second show $ e
+            case find (\((t, _), v) -> constrInString v `notElem` t) tvs of
+                    Just e  -> Left . TypeError . (fst *** show) $ e
                     Nothing -> Right checking
           zipIfPred p@(o, _) as bs
             | o /= EQ || runArityCheck p bl = Right $ zip as bs

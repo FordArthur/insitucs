@@ -26,7 +26,7 @@ import Text.Parsec
       Stream, skipMany1, satisfy, choice, endBy )
 
 import Types
-    ( InsiType(Exp, Bool, Num, Binds, Clo, Vec, Str, Idn, Dict), Label, Defs, succArgs, succNest,
+    ( InsiType(..), Label, Defs, succArgs, succNest,
       toValueOrNullT)
 
 enumEndBy :: a -> (a -> a) -> (a -> Parsec s u b) -> Parsec s u sep -> Parsec s u [b]
@@ -63,6 +63,9 @@ bool = toBool <$> (string "true" <|> string "false")
     where toBool "true"  = Bool True
           toBool "false" = Bool False
 
+null' :: Parsec String () InsiType
+null' = string "null" >> return Null
+
 iden :: Label -> Parsec String () InsiType
 iden l = Idn l <$> accepted
 
@@ -84,7 +87,7 @@ str :: Parsec String () InsiType
 str = between (char '\"') (char '\"') (Str <$> many (noneOf "\""))
 
 insitux :: Label -> Parsec String () InsiType
-insitux p = tryingWith [clo p', num, str, bool, iden p', vec p', dict p', expr p']
+insitux p = tryingWith [null', clo p', num, str, bool, iden p', vec p', dict p', expr p']
     where tryingWith [p] = p
           tryingWith (p:ps) = try p <|> tryingWith ps
           p' = succNest p
@@ -149,7 +152,7 @@ bindings p = do
                           useLabel ix      = ix
                   markClo _ _ ix          = ix
                   endPos = second (const Nothing)
-                    
+
 eval :: Label -> Parsec String () InsiType
 eval p = do
     exprs <- insitux p `sepBy` many ignorable

@@ -2,6 +2,7 @@ module Main where
 
 import Data.Char (isDigit)
 import Data.List (isPrefixOf, elemIndex)
+import Data.Data
 import Control.Monad.State
     ( (>=>),
       MonadTrans(lift),
@@ -12,10 +13,10 @@ import Control.Monad.State
       execStateT,
       StateT (runStateT) )
 import Parser (buildAST)
-import Types (RunError(..), Label, Defs, InsiType(..), toValueOrNullT, opers, builtIn, typeCheck, constrInString)
+import Types (RunError(..), Label, Defs, InsiType(..), IsLazy, toValueOrNullT, opers, builtIn, typeCheck, constrInString)
 
 derefer :: Defs -> InsiType -> StateT Defs (Either RunError) InsiType
-derefer binds i@(Idn p var)
+derefer binds i@(Idn _ var)
     | any (\(o, _) -> o == var) opers = return i
     | otherwise = lift val >>= derefer binds
     where val = lookif (\(Idn _ var') -> var' == var) binds 
@@ -34,12 +35,15 @@ check (Exp (h@(Idn _ f'):args')) = typeCheck h  (todoLookup f' opers) args'
 check (Exp (f':args'))           = typeCheck f' (todoLookup (constrInString f') builtIn) args'
 check ix                         = Right ix
 
-simplify :: InsiType -> StateT Defs (Either RunError) InsiType
-simplify (Exp e) = Exp <$> mapM ((lift . check) >=> eval) e
-simplify ix      = return ix
+simplify :: InsiType -> [IsLazy] -> StateT Defs (Either RunError) InsiType
+simplify (Exp (f:args)) lazy = Exp <$> (mapM (\(ix, lazy) -> if lazy then return ix else run ix) . ((f, False) :) . zip args) lazy
+simplify ix        _    = return ix
 
 run :: InsiType -> StateT Defs (Either RunError) InsiType
-run f = get >>= (`derefer` f) >>= simplify >>= (lift . check) >>= eval
+run f = get >>= (`derefer` f) >>= mkLazy >>= uncurry simplify >>= (lift . check) >>= eval
+    where mkLazy exp@(Exp (Idn _ f:_)) = return (exp, map snd . fst . todoLookup f $ opers)
+          mkLazy exp@(Exp (built:_))   = return (exp, map snd . fst . todoLookup (constrInString built) $ builtIn)
+          mkLazy ix                    = return (ix , [])
 
 substitute :: Defs -> [InsiType] -> StateT Defs (Either RunError) [InsiType]
 substitute binds [f] = (:[]) <$> derefer binds f
@@ -59,7 +63,7 @@ todoLookup x xs =
 
 eval ::  InsiType -> StateT Defs (Either RunError) InsiType
 
-eval (Binds b) = modify (++ b) >> return a
+eval (Binds b) = modify (++ b) >> run a
     where (_, a) = last b
 
 eval (Exp [Num n, Vec xs]) = return . toValueOrNullT id $ floor n `at` xs
@@ -88,9 +92,19 @@ eval (Exp (Clo "fun" l (cloArgs, func):args)) = get >>= exprs
 eval (Exp (Idn _ "+":args)) = return . Num . sum . map fromNum $ args
     where fromNum (Num n) = n
 
-eval (Exp (Idn _ "if":p:a:b:_))
-    | p /= Bool False || p /= Null = return a
-    | otherwise                    = return b
+eval (Exp [Idn _ "if", p, a])
+    | useBool p && (p /= Null) = run a
+    | otherwise                = return Null
+    where useBool (Bool p) = p
+          useBool _        = True
+
+eval (Exp [Idn _ "if", p, a, b])
+    | useBool p && (p /= Null) = run a
+    | otherwise                = run b
+    where useBool (Bool p) = p
+          useBool _        = True
+
+eval (Exp (Idn _ "=":a:rgs)) = return . Bool $ all (a ==) rgs
 
 eval val = return val
 
