@@ -2,7 +2,7 @@
 
 module Types where
 
-import Data.Char
+import Data.Char ( isDigit )
 import Data.List
 import Data.Data
 import Data.Functor
@@ -33,7 +33,7 @@ instance Show InsiType where
     show (Num n)
         | n == fromInteger (round n) = show $ round n
         | otherwise = show n
-    show (Vec (v:vs)) = '[' : show v ++ concatMap showSpace vs ++ " ]"
+    show (Vec (v:vs)) = '[' : show v ++ concatMap showSpace vs ++ "]"
     show (Bool True) = "true"
     show (Bool False) = "false"
     show Null = "null"
@@ -42,7 +42,7 @@ instance Show InsiType where
     show (Binds bs) = let (_, v) = last bs in show v
     show (Clo "lam" _ (_, l:ls)) = "#(" ++ show l ++ concatMap showSpace ls ++ ")"
     show (Clo "part" _ (_, p:ps)) = "@(" ++ show p ++ concatMap showSpace ps ++ ")"
-    show (Clo "fun" _ (a:as, fs)) = "(fn" ++ showSpace a ++ concatMap showSpace as ++ concatMap showSpace fs ++ ")"
+    show (Clo "fun" _ (as, fs)) = "(fn" ++ concatMap showSpace as ++ concatMap showSpace fs ++ ")"
 
 toValueOrNullT :: (t -> InsiType) -> Maybe t -> InsiType
 toValueOrNullT t (Just x) = t x

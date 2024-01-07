@@ -22,7 +22,7 @@ import Text.Parsec
       modifyState,
       Parsec,
       ParseError,
-      Stream, skipMany1, satisfy, choice, endBy, sepEndBy, notFollowedBy )
+      Stream, skipMany1, satisfy, choice, endBy, sepEndBy, notFollowedBy, endBy1 )
 
 import Types
     ( InsiType(..), Label, Defs, succArgs, succNest,
@@ -46,23 +46,25 @@ ignorable = many1 (oneOf " ,\n\t\r")
 accepted :: Parsec String () [Char]
 accepted = notFollowedBy (num <|> str <|> bool <|> null') >> many1 (noneOf " ,\n()[]{}#@;")
 
-getArgs :: [InsiType] -> [InsiType] -> [InsiType] -> ([InsiType], [InsiType])
-getArgs args things [] = (reverse args, reverse things)
-getArgs args things (Idn l ('%':n):xs) = getArgs (Idn l n':args) (Idn l n':things) xs
+splitArgs :: [InsiType] -> [InsiType] -> [InsiType] -> ([InsiType], [InsiType])
+splitArgs args things [] = (reverse args, reverse things)
+splitArgs args things (Idn l ('%':n):xs) = splitArgs (Idn l n':args) (Idn l n':things) xs
     where n' = if null n then "0" else n
-getArgs args things (x:xs) = getArgs args (x:things) xs
+splitArgs args things (x:xs) = splitArgs args (x:things) xs
 
 clo :: Label -> Parsec String () InsiType
-clo (_, p') = between (string "#(" >> skipMany ignorable) (skipMany ignorable >> char ')') (Clo "lam" p . getArgs [] [] <$> (insitux p `sepEndBy` ignorable))
-    <|> between (string "@(" >> skipMany ignorable) (skipMany ignorable >> char ')') (Clo "part" p . getArgs [] [] <$> (insitux p `sepEndBy` ignorable))
-    <|> do
-        string "(fn"
-        skipMany ignorable
-        cloArgs <- iden p `endBy` ignorable
-        funcs <- enumSepEndBy p succArgs insitux ignorable -- or, if no expressions occur, use the last atom in the closure
-        char ')'
-        return $ Clo "fun" p (cloArgs, funcs)
+clo (_, p') = between (string "#(" >> skipMany ignorable) (skipMany ignorable >> char ')') (Clo "lam" p . splitArgs [] [] <$> (insitux p `sepEndBy` ignorable))
+    <|> between (string "@(" >> skipMany ignorable) (skipMany ignorable >> char ')') (Clo "part" p . splitArgs [] [] <$> (insitux p `sepEndBy` ignorable))
+    <|> between (string "(fn" >> skipMany ignorable) (char ')') 
+    (
+        do 
+        cloArgs <- iden p `endBy` ignorable;
+        funcs <- enumSepEndBy p succArgs insitux ignorable;
+        return $ Clo "fun" p $ orFinal cloArgs funcs
+    )
     where p = (Nothing, p')
+          orFinal ys [] = (init ys, [last ys])
+          orFinal ys xs = (ys, xs)
 
 bool :: Parsec String () InsiType
 bool = toBool <$> (string "true" <|> string "false")
@@ -120,7 +122,7 @@ func :: Label -> Parsec String () InsiType
 func p = do
     string "function"
     Idn _ name <- between ignorable ignorable $ iden p
-    vars <- iden p `endBy` ignorable
+    vars <- try $ iden p `endBy` ignorable
     funcs <- enumSepEndBy p succArgs insitux ignorable
     return $ Binds [(Idn p name, Clo "fun" p (vars, funcs))]
 

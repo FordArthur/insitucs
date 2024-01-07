@@ -1,11 +1,12 @@
 module Main where
 
 import System.Environment (getArgs)
-import System.Exit
+import System.Exit (exitWith)
 
-import Data.List 
+import Data.List ( find, isPrefixOf ) 
 
 import Engine (interpret)
+
 
 repl :: IO ()
 repl = do

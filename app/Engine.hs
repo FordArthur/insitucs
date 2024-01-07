@@ -1,6 +1,6 @@
 module Engine where
 
-import System.Exit
+import System.Exit ( ExitCode(..) )
 
 import Data.Char (isDigit)
 import Data.List (isPrefixOf, elemIndex, transpose)
@@ -48,7 +48,7 @@ run f = get >>= (`derefer` f) >>= mkLazy >>= uncurry simplify >>= (lift . check)
           mkLazy ix                    = return (ix , [])
 
 substitute :: Defs -> [InsiType] -> StateT Defs (Either RunError) [InsiType]
-substitute binds [f] = (:[]) <$> derefer binds f
+substitute binds [] = return []
 substitute binds (f:fs) = (:) <$> f' <*> (lift (execStateT f' binds) >>= (\s' -> substitute (s' ++ binds) fs))
     where f' = derefer binds f
 
@@ -83,14 +83,13 @@ eval (Exp [Dict ds, key]) = return value
     where value = toValueOrNullT id $ lookup key ds
 
 eval (Exp (Clo "lam" l (cloArgs, lam):args)) = get >>= exprs >>= eval
-     where exprs s = Exp <$> substitute (zip cloArgs (args ++ repeat Null) ++ s) lam
+     where exprs s = Exp <$> substitute ((Idn l "args", Vec args) : zip cloArgs (args ++ repeat Null) ++ s) lam
 
 eval (Exp (Clo "part" l (cloArgs, lam):args)) = get >>= exprs >>= eval
-    where exprs s = Exp .  (++ args) <$> substitute (zip cloArgs (args ++ repeat Null) ++ s) lam
+    where exprs s = Exp .  (++ args) <$> substitute ((Idn l "args", Vec args) : zip cloArgs (args ++ repeat Null) ++ s) lam
     
 eval (Exp (Clo "fun" l (cloArgs, func):args)) = get >>= exprs
-    where exprs s = lift $ recursiveExec ((Idn l "args", argsKeyword) : zip cloArgs (args ++ repeat Null) ++ s) func l
-          argsKeyword = Vec $ take (length cloArgs) (args ++ repeat Null) 
+    where exprs s = lift $ recursiveExec ((Idn l "args", Vec args) : zip cloArgs (args ++ repeat Null) ++ s) func l
 
 eval (Exp [Idn _ "if", p, a])
     | useBool p && (p /= Null) = run a
