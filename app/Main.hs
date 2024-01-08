@@ -12,7 +12,7 @@ repl :: IO ()
 repl = do
     i <- getLine
     putStrLn . fst . interpret $ i
-    main
+    repl
 
 main :: IO ()
 main = do
