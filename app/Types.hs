@@ -4,11 +4,10 @@ module Types where
 
 import Data.Char ( isDigit )
 import Data.List
+import Data.Map ( Map, toList )
 import Data.Data
 import Data.Functor
 import Control.Arrow
-
-type Label = (Maybe String, Maybe (Int, Int))
 
 succArgs :: Enum c => (a, Maybe (b, c)) -> (a, Maybe (b, c))
 succArgs = second (second succ <$>)
@@ -16,20 +15,22 @@ succArgs = second (second succ <$>)
 succNest :: Enum b => (a, Maybe (b, c)) -> (a, Maybe (b, c))
 succNest = second (first succ <$>)
 
+type IsScoped = Bool
 data InsiType = Str String                          | Num Double  | Vec [InsiType] | 
-                Dict [(InsiType, InsiType)]         | Idn Label String  | Exp [InsiType] |
-                Clo String Label ([InsiType], [InsiType]) | Bool Bool   | Null           |
-                Binds [(InsiType, InsiType)]
-    deriving (Read, Eq, Data)
+                Dict (Map InsiType InsiType)        | Idn String  | Exp [InsiType] |
+                Clo String ([InsiType], [InsiType]) | Bool Bool   | Null           |
+                Binds IsScoped InsiType (Map InsiType InsiType)
+    deriving (Read, Show, Eq, Ord, Data)
 
-type Defs = [(InsiType, InsiType)]
+type Defs = Map InsiType InsiType
 
 showSpace :: Show a => a -> String
 showSpace x = ' ' : show x
 
+{-
 instance Show InsiType where 
     show (Str s) = '\"' : s ++ "\""
-    show (Dict d) = '{' : concatMap (\(k, v) -> ", " ++ show k ++ " " ++ show v) d ++ "}"
+    show (Dict d) = '{' : concatMap (\(k, v) -> ", " ++ show k ++ " " ++ show v) (toList d) ++ "}"
     show (Num n)
         | n == fromInteger (round n) = show $ round n
         | otherwise = show n
@@ -37,12 +38,13 @@ instance Show InsiType where
     show (Bool True) = "true"
     show (Bool False) = "false"
     show Null = "null"
-    show (Idn _ i) = if all isDigit i then '%':i else i
+    show (Idn i) = if all isDigit i then '%':i else i
     show (Exp (e:es)) = '(' : show e ++ concatMap showSpace es ++ ")"
-    show (Binds bs) = let (_, v) = last bs in show v
-    show (Clo "lam" _ (_, l:ls)) = "#(" ++ show l ++ concatMap showSpace ls ++ ")"
-    show (Clo "part" _ (_, p:ps)) = "@(" ++ show p ++ concatMap showSpace ps ++ ")"
-    show (Clo "fun" _ (as, fs)) = "(fn" ++ concatMap showSpace as ++ concatMap showSpace fs ++ ")"
+    show (Binds scope _ bs) = '(' : if scope then "let " else "var " ++ concatMap (\(k, v) -> ", " ++ show k ++ " " ++ show v) (toList bs) ++ ")"
+    show (Clo "lam" (_, l:ls)) = "#(" ++ show l ++ concatMap showSpace ls ++ ")"
+    show (Clo "part" (_, p:ps)) = "@(" ++ show p ++ concatMap showSpace ps ++ ")"
+    show (Clo "fun" (as, fs)) = "(fn" ++ concatMap showSpace as ++ concatMap showSpace fs ++ ")"
+-}
 
 toValueOrNullT :: (t -> InsiType) -> Maybe t -> InsiType
 toValueOrNullT t (Just x) = t x
@@ -108,4 +110,4 @@ typeCheck f (checkers, arityPredicate) checking = (zipIfPred arityPredicate chec
             | otherwise                     = Left  $ ArityError p bl
             where bl = length bs
           runArityCheck (shouldBe, n) n' = shouldBe == n' `compare` n
-          constr = if runArityCheck arityPredicate (length checking) then Exp else if fst arityPredicate /= EQ then (\exp -> Clo "part" (Nothing, Nothing) ([],exp)) else Exp
+          constr = if runArityCheck arityPredicate (length checking) then Exp else if fst arityPredicate /= EQ then (\exp -> Clo "part" ([],exp)) else Exp

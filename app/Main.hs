@@ -7,7 +7,6 @@ import Data.List ( find, isPrefixOf )
 
 import Engine (interpret)
 
-
 repl :: IO ()
 repl = do
     i <- getLine
