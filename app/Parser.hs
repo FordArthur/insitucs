@@ -36,7 +36,7 @@ ignorable = many1 (oneOf " ,\n\t\r")
 
 splitArgs :: [InsiType] -> [InsiType] -> [InsiType] -> ([InsiType], [InsiType])
 splitArgs args things [] = (reverse args, reverse things)
-splitArgs args things (Idn ('%':n):xs) = splitArgs (Idn n':args) (Idn n':things) xs
+splitArgs args things (Idn _ ('%':n):xs) = splitArgs (Idn True n':args) (Idn True n':things) xs
     where n' = if null n then "0" else n
 splitArgs args things (x:xs) = splitArgs args (x:things) xs
 
@@ -62,7 +62,7 @@ null' :: Parsec String () InsiType
 null' = string "null" >> return Null
 
 iden :: Parsec String () InsiType
-iden = Idn <$> (notFollowedBy (num <|> str <|> bool <|> null') >> many1 (noneOf " ,\n()[]{}#@;"))
+iden = Idn False <$> (notFollowedBy (num <|> str <|> bool <|> null') >> many1 (noneOf " ,\n()[]{}#@;"))
 
 numP :: Parsec String () Double
 numP = try (do
@@ -107,11 +107,11 @@ expr = between (char '(' >> skipMany ignorable) (skipMany ignorable >> char ')')
 func :: Parsec String () InsiType
 func = do
     string "function"
-    Idn name <- between ignorable ignorable iden
+    Idn _ name <- between ignorable ignorable iden
     vars <- try $ iden `endBy` ignorable
     funcs <- insitux `sepEndBy` ignorable
     let fun = Clo "fun" (vars, funcs)
-    return . Binds False fun $ Map.singleton (Idn name) fun
+    return . Binds False fun $ Map.singleton (Idn False name) fun
     
 
 bind :: Parsec String () InsiType

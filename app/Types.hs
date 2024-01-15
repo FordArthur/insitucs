@@ -3,11 +3,12 @@
 module Types where
 
 import Data.Char ( isDigit )
-import Data.List
-import Data.Map ( Map, toList )
-import Data.Data
-import Data.Functor
-import Control.Arrow
+import Data.List ( find )
+import qualified Data.Map as Map
+import qualified Data.Vector as Vector
+import Data.Data ( Data(toConstr), showConstr )
+import Data.Functor ( (<&>) )
+import Control.Arrow ( Arrow(..) )
 
 succArgs :: Enum c => (a, Maybe (b, c)) -> (a, Maybe (b, c))
 succArgs = second (second succ <$>)
@@ -17,12 +18,12 @@ succNest = second (first succ <$>)
 
 type IsScoped = Bool
 data InsiType = Str String                          | Num Double  | Vec [InsiType] | 
-                Dict (Map InsiType InsiType)        | Idn String  | Exp [InsiType] |
+                Dict (Map.Map InsiType InsiType)    | Idn IsScoped String  | Exp [InsiType] |
                 Clo String ([InsiType], [InsiType]) | Bool Bool   | Null           |
-                Binds IsScoped InsiType (Map InsiType InsiType)
+                Binds IsScoped InsiType (Map.Map InsiType InsiType)
     deriving (Read, Show, Eq, Ord, Data)
 
-type Defs = Map InsiType InsiType
+type Defs = Map.Map InsiType InsiType
 
 showSpace :: Show a => a -> String
 showSpace x = ' ' : show x
@@ -38,12 +39,12 @@ instance Show InsiType where
     show (Bool True) = "true"
     show (Bool False) = "false"
     show Null = "null"
-    show (Idn i) = if all isDigit i then '%':i else i
+    show (Idn _ i) = if all isDigit i then '%':i else i
     show (Exp (e:es)) = '(' : show e ++ concatMap showSpace es ++ ")"
     show (Binds scope _ bs) = '(' : if scope then "let " else "var " ++ concatMap (\(k, v) -> ", " ++ show k ++ " " ++ show v) (toList bs) ++ ")"
     show (Clo "lam" (_, l:ls)) = "#(" ++ show l ++ concatMap showSpace ls ++ ")"
     show (Clo "part" (_, p:ps)) = "@(" ++ show p ++ concatMap showSpace ps ++ ")"
-    show (Clo "fun" (as, fs)) = "(fn" ++ concatMap showSpace as ++ concatMap showSpace fs ++ ")"
+    show (Clo "fun" (as, fs)) = "(fn" ++ concatMap showSpace as  ++ "," ++ concatMap showSpace fs ++ ")"
 -}
 
 toValueOrNullT :: (t -> InsiType) -> Maybe t -> InsiType
@@ -78,29 +79,30 @@ anyType = ["Str", "Dict", "Num", "Vec", "Bool", "Null", "Idn", "Exp", "Clo"]
 anyTypeStrict :: ([IType], IsLazy)
 anyTypeStrict = (anyType,False)
 
-opers :: [(String, (InTypes, ArityCheck))]
-opers = [("+", numOper),
+opers :: Map.Map String (InTypes, ArityCheck)
+opers = Map.fromList [("+", numOper),
          ("-", numOper),
          ("*", numOper),
          ("/", numOper),
          ("even", ([(["Num"], False)], (EQ, 1))),
          ("odd", ([(["Num"], False)], (EQ, 1))),
-         ("if", ([(anyType, False), (anyType, True), (anyType, True)], (EQ, 3))), 
+         ("if", ([(anyType, False), (anyType, True), (anyType, True)], (GT, 1))), 
          ("=", strictNAry),
          ("and", strictNAry),
          ("or", strictNAry),
          ("map", ((anyType, False):repeat (["Vec", "Str"], False), (GT, 1))),
          ("filter", (replicate 2 (anyType, False), (GT, 1))),
-         ("reduce", (replicate 2 (anyType, False), (GT, 1)))
+         ("reduce", (replicate 2 (anyType, False), (GT, 1))),
+         ("print", (repeat (anyType, False), (GT, 0)))
         ]
     where numOper = (repeat (["Num"], False), (GT, 1))
           strictNAry = (repeat anyTypeStrict, (GT, 1))
 
-builtIn :: [(String, (InTypes, ArityCheck))]
-builtIn = [("Num", ([(["Str", "Vec"], False)], (EQ, 1))), ("Vec", ([anyTypeStrict], (EQ, 1))), ("Dict", ([anyTypeStrict], (EQ, 1))), ("Bool", ([anyTypeStrict, anyTypeStrict], (EQ, 2))), ("Clo", (repeat anyTypeStrict, (GT, -1))), ("Exp", (repeat anyTypeStrict, (GT, -1)))]
+builtIn :: Map.Map String (InTypes, ArityCheck)
+builtIn = Map.fromList [("Num", ([(["Str", "Vec"], False)], (EQ, 1))), ("Vec", ([anyTypeStrict], (EQ, 1))), ("Dict", ([anyTypeStrict], (EQ, 1))), ("Bool", ([anyTypeStrict, anyTypeStrict], (EQ, 2))), ("Clo", (repeat anyTypeStrict, (GT, -1))), ("Exp", (repeat anyTypeStrict, (GT, -1)))]
 
 typeCheck :: InsiType -> (InTypes, ArityCheck) -> [InsiType] -> Either RunError InsiType
-typeCheck f (checkers, arityPredicate) checking = (zipIfPred arityPredicate checkers checking >>= findTypeMismatch) <&> constr . (f:)
+typeCheck f (checkers, arityPredicate) checking = (zipIfPred arityPredicate checkers checking >>= findTypeMismatch) <&> constr . (f :)
     where findTypeMismatch tvs = 
             case find (\((t, _), v) -> constrInString v `notElem` t) tvs of
                     Just e  -> Left . TypeError . (fst *** show) $ e
@@ -110,4 +112,6 @@ typeCheck f (checkers, arityPredicate) checking = (zipIfPred arityPredicate chec
             | otherwise                     = Left  $ ArityError p bl
             where bl = length bs
           runArityCheck (shouldBe, n) n' = shouldBe == n' `compare` n
-          constr = if runArityCheck arityPredicate (length checking) then Exp else if fst arityPredicate /= EQ then (\exp -> Clo "part" ([],exp)) else Exp
+          constr = if not (runArityCheck arityPredicate (length checking)) && fst arityPredicate /= EQ
+                    then (\exp -> Clo "part" ([], exp))
+                    else Exp 
