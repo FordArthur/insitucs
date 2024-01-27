@@ -23,7 +23,7 @@ extra-source-files: CHANGELOG.md
 
 executable insituc
     main-is:          Main.hs
-    ghc-options: -O3 -threaded -prof -fprof-auto
+    ghc-options: -threaded -fprof-auto
 
     -- Modules included in this executable, other than Main.
     other-modules: Engine , Parser , Types

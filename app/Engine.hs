@@ -18,6 +18,7 @@ import Control.Monad.State.Strict
       MonadState(get),
       state,
       mplus,
+      put,
       modify,
       evalStateT,
       execStateT,
@@ -45,9 +46,16 @@ check (Exp (h@(Idn _ f'):args')) = typeCheck h  (todoLookup f' opers) args'
 check (Exp (f':args'))           = typeCheck f' (todoLookup (constrInString f') builtIn) args'
 check ix                         = Right ix
 
+mapMST :: Monad m => (a -> m b) -> [a] -> m [b]
+mapMST f xs = 
+    runST $ do 
+    ys' <- newSTRef $ return []
+    forM_ (reverse xs) (\x -> modifySTRef' ys' (\ys -> (:) <$> f x <*> ys))
+    readSTRef ys'
+
 simplify :: InsiType -> [IsLazy] -> StateT Defs (Either RunError) InsiType
-simplify (Exp (f:args)) lazy = Exp <$> (mapM (\(ix, lazy) -> if lazy then return ix else run ix) . ((f, False) :) . zip args) lazy
-simplify ix        _    = return ix
+simplify (Exp (f:args)) lazy = Exp <$> (mapMST (\(ix, lazy) -> if lazy then return ix else run ix) . ((f, False) :) . zip args) lazy
+simplify ix             _    = return ix
 
 run :: InsiType -> StateT Defs (Either RunError) InsiType
 run f = mkLazy f >>= uncurry simplify >>= (lift . check) >>= eval
@@ -57,14 +65,9 @@ run f = mkLazy f >>= uncurry simplify >>= (lift . check) >>= eval
 
 substitute :: [InsiType] -> StateT Defs (Either RunError) [InsiType]
 substitute = mapMST derefer
-    where mapMST f xs = 
-            runST $ do 
-            ys' <- newSTRef $ return []
-            forM_ xs (\x -> modifySTRef' ys' (\ys -> (++) <$> ys <*> fmap (: []) (f x)))
-            readSTRef ys'
 
 recursiveExec :: [InsiType] -> StateT Defs (Either RunError) InsiType
-recursiveExec (f:fs) = foldlST (\s f -> s >> derefer f >>= run) (derefer f >>= run) fs 
+recursiveExec (f:fs) = foldlST (\s f -> s >> ((get >>= (\s -> Map.union s <$> (derefer f >> get))) $> f) >>= run) (derefer f >>= run) fs 
                        >>= (modify (Map.filterWithKey (\(Idn scope _) _ -> not scope )) $> )
     where foldlST f acc xs = 
             runST $ do
@@ -80,7 +83,7 @@ todoLookup x xs =
 
 eval ::  InsiType -> StateT Defs (Either RunError) InsiType
 
-eval (Binds _ l b) = modify (`Map.union` b) >> run l
+eval (Binds _ l b) = get >>= (\s -> fmap (Map.union s) <$> sequenceA $ Map.map (derefer >=> run) b) >>= put >> derefer l >>= run
 
 eval (Exp [Num n, Vec xs]) = return . toValueOrNullT id $ floor n `at` xs
     where at _ [] = Nothing

@@ -1,4 +1,3 @@
-{-# LANGUAGE TupleSections #-}
 module Parser where
 
 import qualified Data.Map as Map
@@ -29,7 +28,7 @@ import Text.Parsec
 
 import Types
     ( InsiType(..), Defs, succArgs, succNest,
-      toValueOrNullT)
+      toValueOrNullT, IsScoped)
 
 ignorable :: Parsec String () [Char]
 ignorable = many1 (oneOf " ,\n\t\r")
@@ -48,10 +47,11 @@ clo = between (string "#(" >> skipMany ignorable) (skipMany ignorable >> char ')
         do 
         cloArgs <- iden `endBy` ignorable;
         funcs <- insitux `sepEndBy` ignorable;
-        return $ Clo "fun" $ orFinal cloArgs funcs
+        return . Clo "fun" . first localize $ orFinal cloArgs funcs
     )
     where orFinal ys [] = (init ys, [last ys])
           orFinal ys xs = (ys, xs)
+          localize = map (\(Idn _ n) -> Idn True n)
 
 bool :: Parsec String () InsiType
 bool = toBool <$> (string "true" <|> string "false")
@@ -113,23 +113,23 @@ func = do
     let fun = Clo "fun" (vars, funcs)
     return . Binds False fun $ Map.singleton (Idn False name) fun
     
-
 bind :: Parsec String () InsiType
 bind = do
     local <- string "let" <|> string "var"
     skipMany ignorable
-    uncurry (Binds (local == "let")) . foldl1 (\(_, b) (l, b') -> (l, b `Map.union` b')) <$> bindings `sepEndBy` ignorable
+    let scope = local == "let"
+    uncurry (Binds scope) . foldl1 (\(_, b) (l, b') -> (l, b `Map.union` b')) <$> bindings scope `sepEndBy` ignorable
 
-bindings :: Parsec String () (InsiType, Defs)
-bindings = do 
-        name <- iden
+bindings :: IsScoped -> Parsec String () (InsiType, Defs)
+bindings scope = do 
+        Idn _ name <- iden
         skipMany ignorable
         bind <- insitux
-        return (bind, Map.singleton name bind)
+        return (bind, Map.singleton (Idn scope name) bind)
     <|> do 
         pvName <- vec 
         skipMany ignorable
-        pvBind <- together pvName <$> (vec <|> str)
+        pvBind <- scoping scope pvName <$> (vec <|> str)
         return (snd $ last pvBind, Map.fromList pvBind)
     <|> do
         Dict pdName <- dict
@@ -137,8 +137,8 @@ bindings = do
         Dict pdBinding <- dict
         let pdBinded = map (\(k, v) -> (v, toValueOrNullT id $ Map.lookup k pdBinding)) $ Map.toList pdName
             in return (snd $ last pdBinded, Map.fromList pdBinded)
-        where together (Vec n) (Vec b) = zip n b
-              together (Vec n) (Str b) = zipWith (\n' b' -> (n', Str $ b' : "")) n b
+        where scoping s (Vec n) (Vec b) = zipWith (\(Idn _ n ) b -> (Idn s n, b)) n b
+              scoping s (Vec n) (Str b) = zipWith (\(Idn _ n') b' -> (Idn s n', Str $ b' : "")) n b
 
 eval :: Parsec String () InsiType
 eval = Exp <$> insitux `sepEndBy` ignorable

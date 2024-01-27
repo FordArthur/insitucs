@@ -5,10 +5,12 @@ module Types where
 import Data.Char ( isDigit )
 import Data.List ( find )
 import qualified Data.Map as Map
-import qualified Data.Vector as Vector
+import Control.Monad.ST (runST)
+import Data.STRef ( modifySTRef', newSTRef, readSTRef )
 import Data.Data ( Data(toConstr), showConstr )
 import Data.Functor ( (<&>) )
 import Control.Arrow ( Arrow(..) )
+import Control.Monad (forM_)
 
 succArgs :: Enum c => (a, Maybe (b, c)) -> (a, Maybe (b, c))
 succArgs = second (second succ <$>)
@@ -21,17 +23,16 @@ data InsiType = Str String                          | Num Double  | Vec [InsiTyp
                 Dict (Map.Map InsiType InsiType)    | Idn IsScoped String  | Exp [InsiType] |
                 Clo String ([InsiType], [InsiType]) | Bool Bool   | Null           |
                 Binds IsScoped InsiType (Map.Map InsiType InsiType)
-    deriving (Read, Show, Eq, Ord, Data)
+    deriving (Eq, Ord, Data)
 
 type Defs = Map.Map InsiType InsiType
 
 showSpace :: Show a => a -> String
 showSpace x = ' ' : show x
 
-{-
 instance Show InsiType where 
     show (Str s) = '\"' : s ++ "\""
-    show (Dict d) = '{' : concatMap (\(k, v) -> ", " ++ show k ++ " " ++ show v) (toList d) ++ "}"
+    show (Dict d) = '{' : concatMap (\(k, v) -> ", " ++ show k ++ " " ++ show v) (Map.toList d) ++ "}"
     show (Num n)
         | n == fromInteger (round n) = show $ round n
         | otherwise = show n
@@ -41,11 +42,10 @@ instance Show InsiType where
     show Null = "null"
     show (Idn _ i) = if all isDigit i then '%':i else i
     show (Exp (e:es)) = '(' : show e ++ concatMap showSpace es ++ ")"
-    show (Binds scope _ bs) = '(' : if scope then "let " else "var " ++ concatMap (\(k, v) -> ", " ++ show k ++ " " ++ show v) (toList bs) ++ ")"
+    show (Binds scope _ bs) = '(' : if scope then "let " else "var " ++ concatMap (\(k, v) -> ", " ++ show k ++ " " ++ show v) (Map.toList bs) ++ ")"
     show (Clo "lam" (_, l:ls)) = "#(" ++ show l ++ concatMap showSpace ls ++ ")"
     show (Clo "part" (_, p:ps)) = "@(" ++ show p ++ concatMap showSpace ps ++ ")"
     show (Clo "fun" (as, fs)) = "(fn" ++ concatMap showSpace as  ++ "," ++ concatMap showSpace fs ++ ")"
--}
 
 toValueOrNullT :: (t -> InsiType) -> Maybe t -> InsiType
 toValueOrNullT t (Just x) = t x
@@ -67,7 +67,7 @@ type IType = String
 type InTypes = [([IType], IsLazy)]
 type IsLazy = Bool
 
-data RunError = TypeError ([IType], IType) | OutOfScope InsiType | ArityError ArityCheck Int
+data RunError = TypeError [IType] IType | OutOfScope InsiType | ArityError ArityCheck Int
     deriving (Eq, Show)
 
 constrInString :: Data a => a -> String
@@ -102,16 +102,21 @@ builtIn :: Map.Map String (InTypes, ArityCheck)
 builtIn = Map.fromList [("Num", ([(["Str", "Vec"], False)], (EQ, 1))), ("Vec", ([anyTypeStrict], (EQ, 1))), ("Dict", ([anyTypeStrict], (EQ, 1))), ("Bool", ([anyTypeStrict, anyTypeStrict], (EQ, 2))), ("Clo", (repeat anyTypeStrict, (GT, -1))), ("Exp", (repeat anyTypeStrict, (GT, -1)))]
 
 typeCheck :: InsiType -> (InTypes, ArityCheck) -> [InsiType] -> Either RunError InsiType
-typeCheck f (checkers, arityPredicate) checking = (zipIfPred arityPredicate checkers checking >>= findTypeMismatch) <&> constr . (f :)
-    where findTypeMismatch tvs = 
-            case find (\((t, _), v) -> constrInString v `notElem` t) tvs of
-                    Just e  -> Left . TypeError . (fst *** show) $ e
-                    Nothing -> Right checking
-          zipIfPred p@(o, _) as bs
-            | o /= EQ || runArityCheck p bl = Right $ zip as bs
-            | otherwise                     = Left  $ ArityError p bl
-            where bl = length bs
+typeCheck f (checkers, arityPredicate@(order, _)) checking
+    | order /= EQ || runArityCheck arityPredicate (length checking) = constr  . (f:) <$> runTypeChecks checkers checking
+    where runTypeChecks _ [] = Right []
+          runTypeChecks shoulds ares
+            = runST $ do
+                are' <- newSTRef $ Right []
+                shoulds' <- newSTRef shoulds
+                forM_ (reverse ares) $ \ is' -> let is = constrInString is' in do
+                    should <- head <$> readSTRef shoulds'
+                    modifySTRef' are' ((:) <$> runTypeCheck should is is' <*>)
+                readSTRef are'
+                where runTypeCheck (s, _) i i'
+                        | i `elem` s  = Right i'
+                        | otherwise   = Left $ TypeError s i
           runArityCheck (shouldBe, n) n' = shouldBe == n' `compare` n
           constr = if not (runArityCheck arityPredicate (length checking)) && fst arityPredicate /= EQ
-                    then (\exp -> Clo "part" ([], exp))
-                    else Exp 
+                then (\exp -> Clo "part" ([], exp))
+                else Exp 

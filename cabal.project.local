@@ -1,0 +1,3 @@
+ignore-project: False
+profiling: True
+optimization: 1

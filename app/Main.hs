@@ -6,9 +6,7 @@ import System.Exit ( exitWith )
 import Data.List ( find, isPrefixOf ) 
 import Control.Monad ( (>=>) )
 
-import Engine
-import Parser
-import Types
+import Engine (interpret)
 
 repl :: IO ()
 repl = do
